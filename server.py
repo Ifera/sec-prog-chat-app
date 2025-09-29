@@ -1,13 +1,13 @@
 import asyncio
-import json
 import logging
+
 import websockets
 from websockets.exceptions import ConnectionClosedError
 
-from database import Database
-from crypto import *
-from models import *
 from config import config
+from crypto import *
+from database import Database
+from models import *
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -30,11 +30,13 @@ known_servers: dict[str, dict] = {}  # server_id -> {"host": "", "port": "", "pu
 # Seen message cache for loop prevention
 seen_messages: set[str] = set()
 
+
 def init_server():
     global server_id, server_private_key, server_public_key
     server_id = generate_uuid()
     server_private_key, server_public_key = generate_rsa_keypair()
     logger.info(f"Server initialized with ID: {server_id}")
+
 
 async def bootstrap_to_network():
     """Bootstrap this server into the network by connecting to introducers"""
@@ -86,7 +88,7 @@ async def bootstrap_to_network():
 
                         # Connect to all returned servers
                         for client in welcome_payload.clients:
-                            await connect_to_server(client["host"], client["port"], client.get("pubkey"))
+                            await connect_to_server(client["host"], int(client["port"]), client.get("pubkey"))
 
                         # Send SERVER_ANNOUNCE to all connected servers
                         await announce_to_network()
@@ -112,6 +114,7 @@ async def bootstrap_to_network():
             retry_delay *= 2  # Exponential backoff
 
     logger.warning("Bootstrap failed after all retries - continuing without network connection")
+
 
 async def connect_to_server(host: str, port: int, pubkey: str = None):
     """Connect to another server"""
@@ -151,6 +154,7 @@ async def connect_to_server(host: str, port: int, pubkey: str = None):
     except Exception as e:
         logger.error(f"Failed to connect to server {host}:{port}: {e}")
 
+
 async def announce_to_network():
     """Send SERVER_ANNOUNCE to all connected servers"""
     announce_payload = {
@@ -173,6 +177,7 @@ async def announce_to_network():
         except:
             pass
 
+
 async def listen_to_server(websocket: websockets.WebSocketServerProtocol, server_id_int: int):
     """Listen for messages from a connected server"""
     try:
@@ -194,11 +199,13 @@ async def listen_to_server(websocket: websockets.WebSocketServerProtocol, server
         if server_id_int in server_addrs:
             del server_addrs[server_id_int]
 
+
 async def handle_user_advertise(data: dict):
     """Handle USER_ADVERTISE from other servers"""
     payload = UserAdvertisePayload(**data["payload"])
     user_locations[payload.user_id] = f"server_{data['from']}"
     logger.info(f"User {payload.user_id} advertised on server {data['from']}")
+
 
 async def handle_user_remove(data: dict):
     """Handle USER_REMOVE from other servers"""
@@ -206,6 +213,7 @@ async def handle_user_remove(data: dict):
     if user_locations.get(payload.user_id) == f"server_{data['from']}":
         del user_locations[payload.user_id]
         logger.info(f"User {payload.user_id} removed from server {data['from']}")
+
 
 async def handle_server_deliver(data: dict):
     """Handle SERVER_DELIVER from other servers"""
@@ -229,6 +237,7 @@ async def handle_server_deliver(data: dict):
         }
         await local_users[payload.user_id].send(json.dumps(deliver_msg))
 
+
 async def handle_connection(websocket: websockets.WebSocketServerProtocol):
     """Handle incoming WebSocket connections (servers or users)"""
     try:
@@ -245,6 +254,7 @@ async def handle_connection(websocket: websockets.WebSocketServerProtocol):
             await handle_user_connection(websocket)
     except Exception as e:
         logger.error(f"Error handling connection: {e}")
+
 
 async def handle_server_join(websocket: websockets.WebSocketServerProtocol, data: dict):
     """Handle SERVER_HELLO_JOIN from new server"""
@@ -298,6 +308,7 @@ async def handle_server_join(websocket: websockets.WebSocketServerProtocol, data
     servers[hash(temp_id) % 1000000] = websocket  # Temporary ID
     server_addrs[hash(temp_id) % 1000000] = (payload.host, payload.port)
 
+
 async def handle_server_announce(websocket: websockets.WebSocketServerProtocol, data: dict):
     """Handle SERVER_ANNOUNCE"""
     payload = ServerAnnouncePayload(**data["payload"])
@@ -319,6 +330,7 @@ async def handle_server_announce(websocket: websockets.WebSocketServerProtocol, 
             "pubkey": payload.pubkey
         }
         logger.info(f"Introducer registered server: {server_id_str}")
+
 
 async def handle_user_connection(websocket: websockets.WebSocketServerProtocol):
     """Handle user WebSocket connection"""
@@ -345,6 +357,7 @@ async def handle_user_connection(websocket: websockets.WebSocketServerProtocol):
     except Exception as e:
         logger.error(f"Error handling user message: {e}")
 
+
 async def handle_user_hello(websocket: websockets.WebSocketServerProtocol, msg: ProtocolMessage) -> str:
     """Handle USER_HELLO"""
     payload = UserHelloPayload(**msg.payload)
@@ -357,7 +370,8 @@ async def handle_user_hello(websocket: websockets.WebSocketServerProtocol, msg: 
             "to": payload.from_,
             "ts": current_timestamp(),
             "payload": {"code": "NAME_IN_USE", "detail": "User ID already in use"},
-            "sig": compute_transport_sig(load_private_key(server_private_key), {"code": "NAME_IN_USE", "detail": "User ID already in use"})
+            "sig": compute_transport_sig(load_private_key(server_private_key),
+                                         {"code": "NAME_IN_USE", "detail": "User ID already in use"})
         }
         await websocket.send(json.dumps(error_msg))
         return None
@@ -373,6 +387,7 @@ async def handle_user_hello(websocket: websockets.WebSocketServerProtocol, msg: 
     await advertise_user(payload.from_)
 
     return payload.from_
+
 
 async def advertise_user(user_id: str):
     """Send USER_ADVERTISE to all servers"""
@@ -399,6 +414,7 @@ async def advertise_user(user_id: str):
             await server_ws.send(json.dumps(msg))
         except:
             pass  # Handle dead connections
+
 
 async def handle_user_disconnect(user_id: str):
     """Handle user disconnection"""
@@ -427,6 +443,7 @@ async def handle_user_disconnect(user_id: str):
         except:
             pass
 
+
 async def handle_msg_direct(msg: ProtocolMessage):
     """Handle MSG_DIRECT"""
     payload = MsgDirectPayload(**msg.payload)
@@ -451,6 +468,7 @@ async def handle_msg_direct(msg: ProtocolMessage):
     else:
         # Forward via SERVER_DELIVER
         await route_to_user(msg.to, msg)
+
 
 async def route_to_user(target_user: str, original_msg: ProtocolMessage):
     """Route message to user according to spec"""
@@ -484,6 +502,7 @@ async def route_to_user(target_user: str, original_msg: ProtocolMessage):
         # User not found
         logger.warning(f"User {target_user} not found")
 
+
 async def handle_msg_public_channel(msg: ProtocolMessage):
     """Handle MSG_PUBLIC_CHANNEL"""
     # For simplicity, broadcast to all local users
@@ -510,6 +529,7 @@ async def handle_msg_public_channel(msg: ProtocolMessage):
             await user_ws.send(json.dumps(deliver_msg))
         except:
             pass
+
 
 async def handle_command(websocket: websockets.WebSocketServerProtocol, msg: ProtocolMessage):
     """Handle user commands like /list, /tell, /all"""
@@ -591,6 +611,7 @@ async def handle_command(websocket: websockets.WebSocketServerProtocol, msg: Pro
 
         await handle_msg_public_channel(ProtocolMessage(**pub_msg))
 
+
 async def main():
     """Main server function"""
     init_server()
@@ -613,6 +634,7 @@ async def main():
 
     # Keep server running
     await server.wait_closed()
+
 
 if __name__ == "__main__":
     asyncio.run(main())
