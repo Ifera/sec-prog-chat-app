@@ -1,0 +1,139 @@
+import base64
+import hashlib
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.backends import default_backend
+from typing import Tuple
+
+def base64url_encode(data: bytes) -> str:
+    return base64.urlsafe_b64encode(data).decode('utf-8').rstrip('=')
+
+def base64url_decode(data: str) -> bytes:
+    # Add padding if needed
+    missing_padding = len(data) % 4
+    if missing_padding:
+        data += '=' * (4 - missing_padding)
+    return base64.urlsafe_b64decode(data)
+
+def generate_rsa_keypair() -> Tuple[str, str]:
+    """Generate RSA-4096 keypair and return as base64url encoded strings"""
+    private_key = rsa.generate_private_key(
+        public_exponent=65537,
+        key_size=4096,
+        backend=default_backend()
+    )
+
+    public_key = private_key.public_key()
+
+    # Serialize private key
+    private_pem = private_key.private_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PrivateFormat.PKCS8,
+        encryption_algorithm=serialization.NoEncryption()
+    )
+
+    # Serialize public key
+    public_pem = public_key.public_bytes(
+        encoding=serialization.Encoding.PEM,
+        format=serialization.PublicFormat.SubjectPublicKeyInfo
+    )
+
+    return base64url_encode(private_pem), base64url_encode(public_pem)
+
+def load_private_key(private_key_b64: str) -> rsa.RSAPrivateKey:
+    private_pem = base64url_decode(private_key_b64)
+    return serialization.load_pem_private_key(private_pem, password=None, backend=default_backend())
+
+def load_public_key(public_key_b64: str) -> rsa.RSAPublicKey:
+    public_pem = base64url_decode(public_key_b64)
+    return serialization.load_pem_public_key(public_pem, backend=default_backend())
+
+def rsa_encrypt(public_key: rsa.RSAPublicKey, plaintext: bytes) -> str:
+    """Encrypt with RSA-OAEP SHA-256"""
+    ciphertext = public_key.encrypt(
+        plaintext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return base64url_encode(ciphertext)
+
+def rsa_decrypt(private_key: rsa.RSAPrivateKey, ciphertext_b64: str) -> bytes:
+    """Decrypt with RSA-OAEP SHA-256"""
+    ciphertext = base64url_decode(ciphertext_b64)
+    plaintext = private_key.decrypt(
+        ciphertext,
+        padding.OAEP(
+            mgf=padding.MGF1(algorithm=hashes.SHA256()),
+            algorithm=hashes.SHA256(),
+            label=None
+        )
+    )
+    return plaintext
+
+def rsa_sign(private_key: rsa.RSAPrivateKey, data: bytes) -> str:
+    """Sign with RSASSA-PSS SHA-256"""
+    signature = private_key.sign(
+        data,
+        padding.PSS(
+            mgf=padding.MGF1(hashes.SHA256()),
+            salt_length=padding.PSS.MAX_LENGTH
+        ),
+        hashes.SHA256()
+    )
+    return base64url_encode(signature)
+
+def rsa_verify(public_key: rsa.RSAPublicKey, data: bytes, signature_b64: str) -> bool:
+    """Verify RSASSA-PSS SHA-256 signature"""
+    signature = base64url_decode(signature_b64)
+    try:
+        public_key.verify(
+            signature,
+            data,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH
+            ),
+            hashes.SHA256()
+        )
+        return True
+    except:
+        return False
+
+def canonicalize_payload(payload: dict) -> str:
+    """Canonicalize JSON payload for signing (sorted keys, no whitespace)"""
+    return json.dumps(payload, sort_keys=True, separators=(',', ':'))
+
+def compute_content_sig(private_key: rsa.RSAPrivateKey, ciphertext: str, from_id: str, to: str, ts: int) -> str:
+    """Compute content signature for DM: SHA256(ciphertext || from || to || ts)"""
+    data = f"{ciphertext}{from_id}{to}{ts}"
+    return rsa_sign(private_key, data.encode('utf-8'))
+
+def verify_content_sig(public_key: rsa.RSAPublicKey, ciphertext: str, from_id: str, to: str, ts: int, sig_b64: str) -> bool:
+    """Verify content signature for DM"""
+    data = f"{ciphertext}{from_id}{to}{ts}"
+    return rsa_verify(public_key, data.encode('utf-8'), sig_b64)
+
+def compute_public_content_sig(private_key: rsa.RSAPrivateKey, ciphertext: str, from_id: str, ts: int) -> str:
+    """Compute content signature for public channel: SHA256(ciphertext || from || ts)"""
+    data = f"{ciphertext}{from_id}{ts}"
+    return rsa_sign(private_key, data.encode('utf-8'))
+
+def verify_public_content_sig(public_key: rsa.RSAPublicKey, ciphertext: str, from_id: str, ts: int, sig_b64: str) -> bool:
+    """Verify content signature for public channel"""
+    data = f"{ciphertext}{from_id}{ts}"
+    return rsa_verify(public_key, data.encode('utf-8'), sig_b64)
+
+def compute_transport_sig(private_key: rsa.RSAPrivateKey, payload: dict) -> str:
+    """Compute transport signature over canonicalized payload"""
+    canonical = canonicalize_payload(payload)
+    return rsa_sign(private_key, canonical.encode('utf-8'))
+
+def verify_transport_sig(public_key: rsa.RSAPublicKey, payload: dict, sig_b64: str) -> bool:
+    """Verify transport signature"""
+    canonical = canonicalize_payload(payload)
+    return rsa_verify(public_key, canonical.encode('utf-8'), sig_b64)
+
+import json
