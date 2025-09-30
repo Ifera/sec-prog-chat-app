@@ -1,7 +1,7 @@
 import asyncio
 import logging
 
-import websockets
+from websockets import serve, WebSocketServerProtocol, connect
 from websockets.exceptions import ConnectionClosedError
 
 from config import config
@@ -13,9 +13,9 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # In-memory tables as per spec
-servers: dict[int, websockets.WebSocketServerProtocol] = {}  # server_id -> WebSocket connection
+servers: dict[int, WebSocketServerProtocol] = {}  # server_id -> WebSocket connection
 server_addrs: dict[int, tuple] = {}  # server_id -> (host, port)
-local_users: dict[str, websockets.WebSocketServerProtocol] = {}  # user_id -> WebSocket connection
+local_users: dict[str, WebSocketServerProtocol] = {}  # user_id -> WebSocket connection
 user_locations: dict[str, str] = {}  # user_id -> "local" | f"server_{id}"
 
 # Server state
@@ -56,7 +56,7 @@ async def bootstrap_to_network():
                 uri = f"ws://{introducer['host']}:{introducer['port']}/ws"
                 logger.info(f"Attempting to connect to introducer: {uri} (attempt {attempt + 1}/{max_retries})")
 
-                websocket = await websockets.connect(uri)
+                websocket = await connect(uri)
 
                 # Send SERVER_HELLO_JOIN
                 join_payload = {
@@ -122,7 +122,7 @@ async def connect_to_server(host: str, port: int, pubkey: str = None):
         uri = f"ws://{host}:{port}/ws"
         logger.info(f"Connecting to server: {uri}")
 
-        websocket = await websockets.connect(uri)
+        websocket = await connect(uri)
 
         # Send SERVER_ANNOUNCE
         announce_payload = {
@@ -178,7 +178,7 @@ async def announce_to_network():
             pass
 
 
-async def listen_to_server(websocket: websockets.WebSocketServerProtocol, server_id_int: int):
+async def listen_to_server(websocket: WebSocketServerProtocol, server_id_int: int):
     """Listen for messages from a connected server"""
     try:
         async for message in websocket:
@@ -204,6 +204,11 @@ async def handle_user_advertise(data: dict):
     """Handle USER_ADVERTISE from other servers"""
     payload = UserAdvertisePayload(**data["payload"])
     user_locations[payload.user_id] = f"server_{data['from']}"
+
+    # Store user pubkey in DB if not present
+    if not db.get_user(payload.user_id):
+        db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
+
     logger.info(f"User {payload.user_id} advertised on server {data['from']}")
 
 
@@ -218,6 +223,12 @@ async def handle_user_remove(data: dict):
 async def handle_server_deliver(data: dict):
     """Handle SERVER_DELIVER from other servers"""
     payload = ServerDeliverPayload(**data["payload"])
+
+    # Check for duplicate messages
+    msg_key = f"{data['ts']}_{data['from']}_{data['to']}_{hash(json.dumps(data['payload'], sort_keys=True))}"
+    if msg_key in seen_messages:
+        return  # Drop duplicate
+    seen_messages.add(msg_key)
 
     if payload.user_id in local_users:
         # Deliver to local user
@@ -238,7 +249,7 @@ async def handle_server_deliver(data: dict):
         await local_users[payload.user_id].send(json.dumps(deliver_msg))
 
 
-async def handle_connection(websocket: websockets.WebSocketServerProtocol):
+async def handle_connection(websocket: WebSocketServerProtocol):
     """Handle incoming WebSocket connections (servers or users)"""
     try:
         # First message should identify the connection type
@@ -251,12 +262,12 @@ async def handle_connection(websocket: websockets.WebSocketServerProtocol):
             await handle_server_announce(websocket, data)
         else:
             # Assume it's a user connection
-            await handle_user_connection(websocket)
+            await handle_user_connection(websocket, first_data=data)
     except Exception as e:
         logger.error(f"Error handling connection: {e}")
 
 
-async def handle_server_join(websocket: websockets.WebSocketServerProtocol, data: dict):
+async def handle_server_join(websocket: WebSocketServerProtocol, data: dict):
     """Handle SERVER_HELLO_JOIN from new server"""
     payload = ServerHelloJoinPayload(**data["payload"])
 
@@ -309,7 +320,7 @@ async def handle_server_join(websocket: websockets.WebSocketServerProtocol, data
     server_addrs[hash(temp_id) % 1000000] = (payload.host, payload.port)
 
 
-async def handle_server_announce(websocket: websockets.WebSocketServerProtocol, data: dict):
+async def handle_server_announce(websocket: WebSocketServerProtocol, data: dict):
     """Handle SERVER_ANNOUNCE"""
     payload = ServerAnnouncePayload(**data["payload"])
     server_id_str = data["from"]
@@ -332,24 +343,16 @@ async def handle_server_announce(websocket: websockets.WebSocketServerProtocol, 
         logger.info(f"Introducer registered server: {server_id_str}")
 
 
-async def handle_user_connection(websocket: websockets.WebSocketServerProtocol):
+async def handle_user_connection(websocket: WebSocketServerProtocol, first_data=None):
     """Handle user WebSocket connection"""
     user_id = None
     try:
+        if first_data is not None:
+            await process_user_message(websocket, first_data)
+
         async for message in websocket:
             data = json.loads(message)
-            msg = ProtocolMessage(**data)
-
-            if msg.type == "USER_HELLO":
-                user_id = await handle_user_hello(websocket, msg)
-            elif msg.type == "MSG_DIRECT":
-                await handle_msg_direct(msg)
-            elif msg.type == "MSG_PUBLIC_CHANNEL":
-                await handle_msg_public_channel(msg)
-            elif msg.type.startswith("/"):  # Commands
-                await handle_command(websocket, msg)
-            else:
-                logger.warning(f"Unknown message type: {msg.type}")
+            await process_user_message(websocket, data)
 
     except ConnectionClosedError:
         if user_id:
@@ -358,35 +361,48 @@ async def handle_user_connection(websocket: websockets.WebSocketServerProtocol):
         logger.error(f"Error handling user message: {e}")
 
 
-async def handle_user_hello(websocket: websockets.WebSocketServerProtocol, msg: ProtocolMessage) -> str:
-    """Handle USER_HELLO"""
-    payload = UserHelloPayload(**msg.payload)
+async def process_user_message(websocket, data: dict):
+    msg = ProtocolMessage(**data)
+    if msg.type == "USER_HELLO":
+        await handle_user_hello(websocket, msg)
+    elif msg.type == "MSG_DIRECT":
+        await handle_msg_direct(msg)
+    elif msg.type == "MSG_PUBLIC_CHANNEL":
+        await handle_msg_public_channel(msg)
+    elif msg.type.startswith("/"):
+        await handle_command(websocket, msg)
+    else:
+        logger.warning(f"Unknown message type: {msg.type}")
 
-    # Check for duplicate
-    if payload.from_ in local_users:
-        error_msg = {
+
+async def handle_user_hello(websocket, msg: ProtocolMessage) -> str:
+    logger.info(msg)
+    payload = UserHelloPayload(**msg.payload)
+    user_id = msg.from_  # <-- correct source
+
+    if user_id in local_users:
+        error_payload = {"code": "NAME_IN_USE", "detail": "User ID already in use"}
+        await websocket.send(json.dumps({
             "type": "ERROR",
             "from": server_id,
-            "to": payload.from_,
+            "to": user_id,
             "ts": current_timestamp(),
-            "payload": {"code": "NAME_IN_USE", "detail": "User ID already in use"},
-            "sig": compute_transport_sig(load_private_key(server_private_key),
-                                         {"code": "NAME_IN_USE", "detail": "User ID already in use"})
-        }
-        await websocket.send(json.dumps(error_msg))
+            "payload": error_payload,
+            "sig": compute_transport_sig(load_private_key(server_private_key), error_payload)
+        }))
         return None
 
-    # Register user
-    local_users[payload.from_] = websocket
-    user_locations[payload.from_] = "local"
+    local_users[user_id] = websocket
+    user_locations[user_id] = "local"
+    db.add_user(user_id, payload.pubkey, "", "", {})  # store pubkey
 
-    # Store in database
-    db.add_user(payload.from_, payload.pubkey, "", "", {})  # TODO: proper storage
+    # gossip to servers (kept as-is)
+    await advertise_user(user_id)
 
-    # Advertise to network
-    await advertise_user(payload.from_)
+    # NEW: also notify all local clients so they learn pubkeys immediately
+    await broadcast_user_advertise_to_local(user_id, payload.pubkey)
 
-    return payload.from_
+    return user_id
 
 
 async def advertise_user(user_id: str):
@@ -398,6 +414,7 @@ async def advertise_user(user_id: str):
     payload = {
         "user_id": user_id,
         "server_id": server_id,
+        "pubkey": user_data["pubkey"],
         "meta": user_data.get("meta", {})
     }
 
@@ -414,6 +431,27 @@ async def advertise_user(user_id: str):
             await server_ws.send(json.dumps(msg))
         except:
             pass  # Handle dead connections
+
+
+async def broadcast_user_advertise_to_local(user_id: str, pubkey: str):
+    advertise = {
+        "type":"USER_ADVERTISE",
+        "from": server_id,
+        "to": "*",
+        "ts": current_timestamp(),
+        "payload": {
+            "user_id": user_id,
+            "server_id": server_id,
+            "pubkey": pubkey,
+            "meta": {}
+        },
+        "sig": ""  # optional for now on local
+    }
+    for uid, ws in local_users.items():
+        try:
+            await ws.send(json.dumps(advertise))
+        except:
+            pass
 
 
 async def handle_user_disconnect(user_id: str):
@@ -531,7 +569,7 @@ async def handle_msg_public_channel(msg: ProtocolMessage):
             pass
 
 
-async def handle_command(websocket: websockets.WebSocketServerProtocol, msg: ProtocolMessage):
+async def handle_command(websocket: WebSocketServerProtocol, msg: ProtocolMessage):
     """Handle user commands like /list, /tell, /all"""
     parts = msg.type.split()
     if not parts:
@@ -552,42 +590,7 @@ async def handle_command(websocket: websockets.WebSocketServerProtocol, msg: Pro
         }
         await websocket.send(json.dumps(response))
 
-    elif cmd == "/tell" and len(parts) >= 3:
-        # DM: /tell <user> <message>
-        target_user = parts[1]
-        message_text = " ".join(parts[2:])
 
-        # Encrypt message
-        target_data = db.get_user(target_user)
-        if not target_data:
-            return
-
-        sender_data = db.get_user(msg.from_)
-        if not sender_data:
-            return
-
-        sender_priv_key = load_private_key(sender_data["privkey_store"])  # TODO: decrypt
-        target_pub_key = load_public_key(target_data["pubkey"])
-
-        ciphertext = rsa_encrypt(target_pub_key, message_text.encode('utf-8'))
-        content_sig = compute_content_sig(sender_priv_key, ciphertext, msg.from_, target_user, msg.ts)
-
-        dm_payload = {
-            "ciphertext": ciphertext,
-            "sender_pub": sender_data["pubkey"],
-            "content_sig": content_sig
-        }
-
-        dm_msg = {
-            "type": "MSG_DIRECT",
-            "from": msg.from_,
-            "to": target_user,
-            "ts": current_timestamp(),
-            "payload": dm_payload,
-            "sig": ""  # Optional for user messages
-        }
-
-        await handle_msg_direct(ProtocolMessage(**dm_msg))
 
     elif cmd == "/all" and len(parts) >= 2:
         # Public message: /all <message>
@@ -617,7 +620,7 @@ async def main():
     init_server()
 
     # Start WebSocket server
-    server = await websockets.serve(
+    server = await serve(
         handle_connection,
         config.host,
         config.port,

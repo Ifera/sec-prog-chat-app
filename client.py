@@ -14,6 +14,7 @@ class SOCPClient:
         self.private_key = None
         self.public_key = None
         self.websocket = None
+        self.known_pubkeys = {}  # user_id -> pubkey
 
     def init_user(self, user_id: str = None):
         """Initialize user with RSA keys"""
@@ -73,12 +74,15 @@ class SOCPClient:
             await self.handle_user_deliver(data)
         elif msg_type == "COMMAND_RESPONSE":
             await self.handle_command_response(data)
+        elif msg_type == "USER_ADVERTISE":
+            await self.handle_user_advertise(data)
         elif msg_type == "ERROR":
             print(f"Error: {data['payload']}")
         else:
             print(f"Received: {data}")
 
     async def handle_user_deliver(self, data: dict):
+        print(data)
         """Handle USER_DELIVER message"""
         payload = data["payload"]
 
@@ -121,17 +125,84 @@ class SOCPClient:
             users = payload.get("users", [])
             print(f"Online users: {', '.join(users)}")
 
+    async def handle_user_advertise(self, data: dict):
+        """Handle USER_ADVERTISE"""
+        payload = data["payload"]
+        user_id = payload["user_id"]
+        pubkey = payload["pubkey"]
+        self.known_pubkeys[user_id] = pubkey
+        print(f"User {user_id} is online")
+
     async def send_command(self, command: str):
         """Send a command to the server"""
-        msg = {
-            "type": command,
-            "from_": self.user_id,
-            "to": "server",
-            "ts": current_timestamp(),
-            "payload": {},
-            "sig": ""
-        }
-        await self.websocket.send(json.dumps(msg))
+        parts = command.split()
+        if not parts:
+            return
+
+        cmd = parts[0]
+
+        if cmd == "/tell" and len(parts) >= 3:
+            target_user = parts[1]
+            message_text = " ".join(parts[2:])
+
+            if target_user not in self.known_pubkeys:
+                print(f"Unknown user: {target_user}")
+                return
+
+            # Encrypt message
+            target_pub_key = load_public_key(self.known_pubkeys[target_user])
+            ciphertext = rsa_encrypt(target_pub_key, message_text.encode('utf-8'))
+            content_sig = compute_content_sig(load_private_key(self.private_key), ciphertext, self.user_id, target_user, current_timestamp())
+
+            dm_payload = {
+                "ciphertext": ciphertext,
+                "sender_pub": self.public_key,
+                "content_sig": content_sig
+            }
+
+            dm_msg = {
+                "type": "MSG_DIRECT",
+                "from_": self.user_id,
+                "to": target_user,
+                "ts": current_timestamp(),
+                "payload": dm_payload,
+                "sig": ""  # Optional for user messages
+            }
+
+            await self.websocket.send(json.dumps(dm_msg))
+
+        elif cmd == "/all" and len(parts) >= 2:
+            message_text = " ".join(parts[1:])
+
+            # For now, send unencrypted
+            pub_payload = {
+                "ciphertext": message_text,  # TODO: encrypt with group key
+                "sender_pub": self.public_key,
+                "content_sig": ""  # TODO
+            }
+
+            pub_msg = {
+                "type": "MSG_PUBLIC_CHANNEL",
+                "from_": self.user_id,
+                "to": "public",
+                "ts": current_timestamp(),
+                "payload": pub_payload,
+                "sig": ""
+            }
+
+            await self.websocket.send(json.dumps(pub_msg))
+
+        else:
+            # Other commands like /list
+            msg = {
+                "type": command,
+                "from_": self.user_id,
+                "to": "server",
+                "ts": current_timestamp(),
+                "payload": {},
+                "sig": ""
+            }
+            await self.websocket.send(json.dumps(msg))
 
     async def send_message(self, message_type: str, payload: dict):
         """Send a message to the server"""

@@ -32,6 +32,7 @@ class ServerAnnouncePayload(BaseModel):
 class UserAdvertisePayload(BaseModel):
     user_id: str
     server_id: str
+    pubkey: str
     meta: Optional[Dict[str, Any]] = None
 
 class UserRemovePayload(BaseModel):
