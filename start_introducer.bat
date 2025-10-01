@@ -9,7 +9,7 @@ rem   1) CLI args override
 rem   2) .introducer.env (if present) else .server.env
 rem   3) Defaults
 rem Defaults:
-rem   PORT=8000  HOST=127.0.0.1  INTRODUCERS_JSON=introducers.json  IS_INTRODUCER=true
+rem   PORT=8000  HOST=127.0.0.1  INTRODUCERS_JSON=introducers.json
 rem --------------------------------------------
 
 set "ENV_FILE=.introducer.env"
@@ -32,7 +32,6 @@ rem 2) Apply defaults if not defined by env file
 if not defined PORT set "PORT=8000"
 if not defined HOST set "HOST=127.0.0.1"
 if not defined INTRODUCERS_JSON set "INTRODUCERS_JSON=introducers.json"
-if not defined IS_INTRODUCER set "IS_INTRODUCER=true"
 
 rem 3) CLI args override env/defaults
 if not "%~1"=="" set "PORT=%~1"
@@ -43,15 +42,13 @@ echo Starting Introducer with:
 echo   HOST              = %HOST%
 echo   PORT              = %PORT%
 echo   INTRODUCERS_JSON  = %INTRODUCERS_JSON%
-echo   IS_INTRODUCER     = %IS_INTRODUCER%
 echo.
 
 rem Export variables for the Python process
 set "HOST=%HOST%"
 set "PORT=%PORT%"
 set "INTRODUCERS_JSON=%INTRODUCERS_JSON%"
-set "IS_INTRODUCER=%IS_INTRODUCER%"
 
-python server.py
+python introducer.py
 echo.
 pause

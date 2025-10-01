@@ -102,8 +102,13 @@ class ServerDeliverPayload(BaseModel):
     content_sig: str
 
 
+class ServerType(StrEnum):
+    INTRODUCER = "INTRODUCER"
+    SERVER = "SERVER"
+
+
 class HeartbeatPayload(BaseModel):
-    pass
+    server_type: ServerType
 
 
 # User <-> Server Messages

@@ -16,7 +16,7 @@ from crypto import (
 )
 from models import MsgType, current_timestamp, generate_uuid
 
-logging.basicConfig(level=config.logging_level)
+logging.basicConfig(level=config.logging_level, format=config.logging_format)
 logger = logging.getLogger("Client")
 
 

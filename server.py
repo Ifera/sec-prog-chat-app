@@ -1,11 +1,8 @@
 import asyncio
 import json
 import logging
-import os
 import time
-from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional
-from typing import Union
 
 from websockets.asyncio.client import connect, ClientConnection
 from websockets.asyncio.server import serve, ServerConnection
@@ -15,33 +12,22 @@ from websockets.exceptions import (
     WebSocketException,
 )
 
+from common import Peer
 from config import config
 from crypto import generate_rsa_keypair, load_private_key, compute_transport_sig
 from database import Database
 from models import (
     MsgType, ErrorCode,
     ProtocolMessage,
-    ServerHelloJoinPayload, ServerAnnouncePayload, ServerWelcomePayload, ServerInfo,
-    ServerGoodbyePayload,
+    ServerHelloJoinPayload, ServerAnnouncePayload, ServerWelcomePayload, ServerGoodbyePayload,
     UserAdvertisePayload, UserRemovePayload, ServerDeliverPayload, HeartbeatPayload,
     UserHelloPayload, MsgDirectPayload, MsgPublicChannelPayload, ErrorPayload,
-    UserDeliverPayload,
-    current_timestamp, generate_uuid, CommandPayload
+    UserDeliverPayload, CommandPayload,
+    current_timestamp, generate_uuid, ServerType
 )
 
-logging.basicConfig(level=config.logging_level)
+logging.basicConfig(level=config.logging_level, format=config.logging_format)
 logger = logging.getLogger("Server")
-
-
-@dataclass
-class Peer:
-    sid: str
-    ws: Union[ClientConnection, ServerConnection]
-    host: str
-    port: int
-    pubkey: Optional[str] = None
-    last_seen: float = field(default_factory=lambda: time.time())
-    missed: int = 0
 
 
 async def _error_upstream(origin: str, code: ErrorCode, detail: str):
@@ -57,17 +43,16 @@ class Server:
 
         self.db = Database(config.db_path)
 
-        # ==== in-memory tables ====
-        # peers by server UUID
+        # remote servers
         self.peers: Dict[str, Peer] = {}  # sid -> Peer
         self.server_addrs: Dict[str, Tuple[str, int]] = {}  # sid -> (host, port)
 
-        # local presence + routing
+        # local presence + routing (user clients)
         self.local_users: Dict[str, ServerConnection] = {}  # user_id -> ws
         self.user_locations: Dict[str, str] = {}  # user_id -> "local" | f"server_{sid}"
 
-        # introducer directory (only used if this is an introducer)
-        self.known_servers: Dict[str, Dict[str, str | int]] = {}  # sid -> {host, port, pubkey}
+        # connection roles (server vs user) for incoming sockets
+        self.connection_roles: Dict[ServerConnection, str] = {}  # ws -> "server" | "user"
 
         # duplicate suppression for forwarded deliveries
         self.seen_ids: set[str] = set()
@@ -75,6 +60,9 @@ class Server:
         # shutdown controls
         self._stop_evt = asyncio.Event()
         self._bg_tasks: set[asyncio.Task] = set()
+
+        # reconnection serialization per sid
+        self._reconnect_locks: Dict[str, asyncio.Lock] = {}  # sid -> lock
 
     # ---------- lifecycle ----------
     def init_server(self):
@@ -85,34 +73,26 @@ class Server:
     async def start(self):
         self.init_server()
 
-        # background: bootstrap + health monitor
+        # background tasks
         self._bg_tasks.add(asyncio.create_task(self.bootstrap_to_network(), name="bootstrap"))
         self._bg_tasks.add(asyncio.create_task(self._health_monitor(), name="health-monitor"))
 
-        # optional: Windows-only Ctrl+X hotkey (Ctrl+X = b'\x18')
-        if os.name == "nt":
-            self._bg_tasks.add(asyncio.create_task(self._win_hotkey_listener(), name="hotkey"))
-
         async with serve(self._incoming, config.host, config.port, ping_interval=None, ping_timeout=None):
-            # NOTE: we disable websockets' built-in pings; we do explicit ping/pong timing.
             logger.info(f"[LISTEN] ws://{config.host}:{config.port}/ws")
             try:
                 await self._stop_evt.wait()
             except asyncio.CancelledError:
-                # clean shutdown path
                 pass
             finally:
                 await self._shutdown_cleanup()
 
     async def shutdown(self, reason: str = "shutdown"):
-        """Trigger graceful shutdown."""
         if not self._stop_evt.is_set():
             logger.info("[STOP] Shutting down…")
             await self._broadcast_goodbye(reason=reason)
             self._stop_evt.set()
 
     async def _shutdown_cleanup(self):
-        # cancel background tasks
         for t in list(self._bg_tasks):
             if not t.done():
                 t.cancel()
@@ -126,7 +106,7 @@ class Server:
             except Exception:
                 logging.exception(f"[CLOSE] closing peer {sid} failed")
         self.peers.clear()
-        self.server_addrs.clear()
+        # keep server_addrs (harmless)
 
         # close local user sockets
         for uid, ws in list(self.local_users.items()):
@@ -135,34 +115,12 @@ class Server:
             except Exception:
                 logging.exception(f"[CLOSE] closing user {uid} failed")
         self.local_users.clear()
+        self.connection_roles.clear()
 
         logger.info("[STOP] Clean exit.")
 
-    # ---------- Windows hotkey (optional) ----------
-    async def _win_hotkey_listener(self):
-        """Press Ctrl+X on Windows console to stop gracefully."""
-        try:
-            import msvcrt  # only on Windows
-        except Exception:
-            return
-        while not self._stop_evt.is_set():
-            await asyncio.sleep(0.05)
-            try:
-                if msvcrt.kbhit():
-                    ch = msvcrt.getch()
-                    if ch == b'\x18':  # Ctrl+X
-                        await self.shutdown("ctrl+x")
-                        break
-            except Exception:
-                logging.exception("[HOTKEY] failed")
-                break
-
     # ---------- bootstrap & linking ----------
     async def bootstrap_to_network(self):
-        if config.is_introducer:
-            logger.info("[BOOTSTRAP] Acting as introducer; awaiting joins.")
-            return
-
         logger.info("[BOOTSTRAP] Starting bootstrap to introducers...")
         backoff = 2
         for attempt in range(1, 6):
@@ -194,15 +152,12 @@ class Server:
                             continue
 
                         welcome = ServerWelcomePayload(**data["payload"])
-                        # The introducer may assign/confirm our ID
                         self.server_id = welcome.assigned_id
                         logger.info(f"[BOOTSTRAP] Assigned ID: {self.server_id}")
 
-                        # Connect to the returned server list (servers, not users)
                         for si in welcome.servers:
                             await self._connect_to_server(si.server_id, si.host, int(si.port), si.pubkey)
 
-                        # Announce ourselves to everyone we connected to
                         await self._broadcast_announce()
                         logger.info("[BOOTSTRAP] Completed.")
                         return
@@ -251,83 +206,54 @@ class Server:
 
     async def _broadcast_announce(self):
         payload = ServerAnnouncePayload(host=config.host, port=config.port, pubkey=self.server_public_key).model_dump()
-        for sid, peer in list(self.peers.items()):
-            try:
-                msg = {
-                    "type": MsgType.SERVER_ANNOUNCE,
-                    "from": self.server_id,
-                    "to": sid,
-                    "ts": current_timestamp(),
-                    "payload": payload,
-                    "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
-                }
-                await peer.ws.send(json.dumps(msg))
-            except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
-                logger.warning(f"[ANNOUNCE] {sid} closed during announce")
-                await self._on_peer_closed(sid)
-            except Exception:
-                logging.exception(f"[ANNOUNCE] send to {sid} failed")
-                await self._on_peer_closed(sid)
-
-    async def _broadcast_goodbye(self, reason: str = "shutdown"):
-        payload = ServerGoodbyePayload(reason=reason).model_dump()
-        for sid, peer in list(self.peers.items()):
-            try:
-                msg = {
-                    "type": MsgType.SERVER_GOODBYE,
-                    "from": self.server_id,
-                    "to": sid,
-                    "ts": current_timestamp(),
-                    "payload": payload,
-                    "sig": "",
-                }
-                await peer.ws.send(json.dumps(msg))
-            except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
-                # already gone; nothing further
-                pass
-            except Exception:
-                logging.exception(f"[GOODBYE] send to {sid} failed")
-
-    async def _print_servers(self):
-        for sid, peer in list(self.peers.items()):
-            logger.info(f"[{sid}] {peer.host}:{peer.port} {peer.pubkey}")
-
-    # ---------- HEALTH / HEARTBEAT ----------
-    async def _probe_peer(self, sid: str, host: str, port: int) -> bool:
-        """
-        Liveness probe using a NEW websocket connection (do NOT use cached peer.ws).
-        Connect -> send a lightweight HEARTBEAT -> close.
-        Returns True iff the probe succeeded end-to-end.
-        """
-        uri = f"ws://{host}:{port}/ws"
-        try:
-            # short connect timeout
-            conn = await asyncio.wait_for(connect(uri), timeout=5)
-        except Exception:
-            logging.exception(f"[PROBE] connect failed to {sid} @ {host}:{port}")
-            return False
-
-        try:
-            # send a tiny heartbeat frame (no need to wait for a reply)
-            hb = {
-                "type": MsgType.HEARTBEAT,
+        for sid in list(self.peers.keys()):
+            msg = {
+                "type": MsgType.SERVER_ANNOUNCE,
                 "from": self.server_id,
                 "to": sid,
                 "ts": current_timestamp(),
-                "payload": HeartbeatPayload().model_dump(),
+                "payload": payload,
+                "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
+            }
+            await self._send_with_retry(sid, msg)
+
+    async def _broadcast_goodbye(self, reason: str = "shutdown"):
+        payload = ServerGoodbyePayload(reason=reason).model_dump()
+        for sid in list(self.peers.keys()):
+            msg = {
+                "type": MsgType.SERVER_GOODBYE,
+                "from": self.server_id,
+                "to": sid,
+                "ts": current_timestamp(),
+                "payload": payload,
                 "sig": "",
             }
-            await asyncio.wait_for(conn.send(json.dumps(hb)), timeout=3)
-            # optional: try to read a byte or just rely on TCP handshake + send success
-            return True
-        except Exception:
-            logging.exception(f"[PROBE] heartbeat send failed to {sid} @ {host}:{port}")
-            return False
-        finally:
+            # best-effort; don't reconnect on goodbye
             try:
-                await conn.close()
+                peer = self.peers.get(sid)
+                if peer:
+                    await peer.ws.send(json.dumps(msg))
             except Exception:
-                logging.exception(f"[PROBE] close failed for {sid}")
+                pass
+
+    # ---------- HEALTH / HEARTBEAT ----------
+    async def _probe_peer(self, sid: str, host: str, port: int) -> bool:
+        uri = f"ws://{host}:{port}/ws"
+        try:
+            async with connect(uri) as conn:  # auto-closes
+                hb = {
+                    "type": MsgType.HEARTBEAT,
+                    "from": self.server_id,
+                    "to": sid,
+                    "ts": current_timestamp(),
+                    "payload": HeartbeatPayload(server_type=ServerType.SERVER).model_dump(),
+                    "sig": "",
+                }
+                await asyncio.wait_for(conn.send(json.dumps(hb)), timeout=3)
+                return True
+        except Exception:
+            logging.error(f"[PROBE] failed to {sid} @ {host}:{port}")
+            return False
 
     async def _health_monitor(self):
         """
@@ -342,7 +268,6 @@ class Server:
         while not self._stop_evt.is_set():
             start = time.time()
 
-            # snapshot to avoid dict-size change during iteration
             peers_snapshot = list(self.peers.items())
             for sid, peer in peers_snapshot:
                 host, port = peer.host, peer.port
@@ -352,14 +277,12 @@ class Server:
                     now = time.time()
 
                     if probe_ok:
-                        # Fresh connection worked – consider peer alive
                         peer.last_seen = now
                         peer.missed = 0
                     else:
                         peer.missed += 1
                         logger.warning(f"[HEALTH] probe failed for {sid} (missed={peer.missed})")
 
-                        # If they've been quiet for too long, or we missed enough probes, drop them
                         quiet = now - peer.last_seen
                         if quiet > timeout_s or peer.missed >= 2:
                             logger.warning(
@@ -368,44 +291,136 @@ class Server:
                             continue
 
                 except Exception:
-                    # absolutely no silent failures
                     logging.exception(f"[HEALTH] unexpected error while probing {sid}")
-                    # treat as a miss in case of coding/runtime errors
                     peer.missed += 1
                     if peer.missed >= 2:
                         await self._on_peer_closed(sid, timed_out=True)
 
-            # sleep the remainder of the interval
             elapsed = time.time() - start
             await asyncio.sleep(max(0.0, hb_interval - elapsed))
 
+    # ---------- reconnect & retry ----------
+    async def _await_peer_entry(self, sid: str, timeout: float = 1.0) -> bool:
+        """
+        Wait up to `timeout` for a reconnected peer entry to appear.
+        We don't rely on any `.closed` attribute (not provided by asyncio API).
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(0.05, timeout)
+        while loop.time() < deadline:
+            if sid in self.peers:
+                return True
+            await asyncio.sleep(0.05)
+        return False
+
+    async def _reconnect_peer(self, sid: str) -> bool:
+        """
+        Re-establish a server peer connection using self.server_addrs[sid].
+        Serialized per-sid to avoid races. Returns True if the peer entry exists after connect.
+        """
+        addr = self.server_addrs.get(sid)
+        if not addr:
+            return False
+
+        lock = self._reconnect_locks.setdefault(sid, asyncio.Lock())
+        async with lock:
+            if sid in self.peers:
+                return True
+
+            host, port = addr
+            try:
+                logger.info(f"[RECONNECT] dialing {sid} @ {host}:{port}")
+                await self._connect_to_server(sid, host, int(port), pubkey=None)
+
+                await self._await_peer_entry(sid, timeout=1.0)
+                # tiny settle to let remote process SERVER_ANNOUNCE
+                await asyncio.sleep(0.1)
+
+                ok = sid in self.peers
+                if ok:
+                    logger.info(f"[RECONNECT] {sid} restored")
+                else:
+                    logger.warning(f"[RECONNECT] {sid} still absent")
+                return ok
+            except Exception:
+                logging.exception(f"[RECONNECT] failed for {sid}")
+                return False
+
+    async def _send_with_retry(self, sid: str, msg: dict) -> bool:
+        """
+        Send `msg` to peer `sid`. If the first send fails due to a websocket issue,
+        try a single reconnect and re-send. Returns True if sent.
+        """
+        # First attempt
+        try:
+            peer = self.peers.get(sid)
+            if not peer:
+                return False
+            await peer.ws.send(json.dumps(msg))
+            return True
+        except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
+            # try to reconnect and retry once
+            if await self._reconnect_peer(sid):
+                try:
+                    peer2 = self.peers.get(sid)
+                    if not peer2:
+                        return False
+                    await peer2.ws.send(json.dumps(msg))
+                    return True
+                except (ConnectionClosedOK, ConnectionClosedError, WebSocketException):
+                    # remote closed immediately after reconnect; prune silently
+                    await self._on_peer_closed(sid)
+                    return False
+                except Exception:
+                    logging.exception(f"[SEND-RETRY] retry send to {sid} failed after reconnect")
+                    return False
+            # couldn't reconnect
+            logger.warning(f"[SEND-RETRY] {sid} unreachable; dropping message")
+            return False
+        except Exception:
+            logging.exception(f"[SEND] send to {sid} failed")
+            return False
+
+    # ---------- peer close ----------
     async def _on_peer_closed(self, sid: str, timed_out: bool = False):
-        """Cleanup when a peer is closed or unhealthy."""
+        """Cleanup when a *server* peer is closed or unhealthy."""
         peer = self.peers.pop(sid, None)
-        self.server_addrs.pop(sid, None)
+
+        # keep self.server_addrs[sid] so we can still reconnect later
+
         if peer:
             try:
                 await peer.ws.close()
             except Exception:
-                # log but continue; we're already cleaning up
                 logging.exception(f"[CLOSE] peer close {sid} failed")
-        # if introducer, also remove from directory
-        if config.is_introducer and sid in self.known_servers:
-            self.known_servers.pop(sid, None)
-            reason = "timeout" if timed_out else "disconnect"
-            logger.info(f"[INTRODUCER] Removed {sid} from directory due to {reason}")
 
     def _forget_peer(self, sid: str):
         self.peers.pop(sid, None)
-        self.server_addrs.pop(sid, None)
+        # keep server_addrs to allow reconnect attempts later
 
     # ---------- incoming handling ----------
     async def _incoming(self, websocket: ServerConnection):
+        """
+        Differentiate *server peer* vs *user client* by inspecting the first frame.
+        Also record the role for this connection.
+        """
         try:
             first_raw = await websocket.recv()
             first = json.loads(first_raw)
-            logger.info(f"[INCOMING] Request: {first}")
             ftype = first.get("type")
+
+            # Decide role
+            if ftype in {
+                MsgType.SERVER_HELLO_JOIN, MsgType.SERVER_ANNOUNCE,
+                MsgType.SERVER_GOODBYE, MsgType.SERVER_WELCOME,
+                MsgType.USER_ADVERTISE, MsgType.USER_REMOVE,
+                MsgType.SERVER_DELIVER, MsgType.HEARTBEAT, MsgType.ACK
+            }:
+                self.connection_roles[websocket] = "server"
+                logger.info(f"[INCOMING(server)] {first}")
+            else:
+                self.connection_roles[websocket] = "user"
+                logger.info(f"[INCOMING(user)] {first}")
 
             if ftype == MsgType.SERVER_HELLO_JOIN:
                 await self._handle_server_join(websocket, first)
@@ -418,13 +433,13 @@ class Server:
                 await websocket.close()
                 return
             if ftype == MsgType.HEARTBEAT:
-                # peer heartbeat as first message is odd but not harmful
+                # allowed; fall through
                 pass
 
             # treat as user connection
             await self._handle_user_connection(websocket, first)
+
         except (ConnectionClosedError, ConnectionClosedOK):
-            # connection gone while reading first frame — nothing to do
             pass
         except json.JSONDecodeError:
             logging.exception("[INCOMING] invalid JSON on first frame")
@@ -434,24 +449,7 @@ class Server:
     async def _handle_server_join(self, websocket: ServerConnection, data: dict):
         try:
             payload = ServerHelloJoinPayload(**data["payload"])
-
-            # Introducer assigns ID and returns server list (servers, not users)
-            if config.is_introducer:
-                requested_id = data.get("from") or generate_uuid()
-                assigned_id = requested_id if requested_id not in self.known_servers else generate_uuid()
-                self.known_servers[assigned_id] = {"host": payload.host, "port": payload.port, "pubkey": payload.pubkey}
-
-                servers_payload = []
-                for sid, s in self.known_servers.items():
-                    if sid == assigned_id:
-                        continue
-                    servers_payload.append(
-                        ServerInfo(server_id=sid, host=s["host"], port=int(s["port"]), pubkey=s["pubkey"]).model_dump()
-                    )
-
-                welcome = ServerWelcomePayload(assigned_id=assigned_id, servers=servers_payload).model_dump()
-            else:
-                welcome = ServerWelcomePayload(assigned_id=data.get("from") or generate_uuid(), servers=[]).model_dump()
+            welcome = ServerWelcomePayload(assigned_id=data.get("from") or generate_uuid(), servers=[]).model_dump()
 
             msg = {
                 "type": MsgType.SERVER_WELCOME,
@@ -478,7 +476,6 @@ class Server:
             payload = ServerAnnouncePayload(**data["payload"])
             sid = data["from"]
 
-            # either update existing peer or add new
             if sid in self.peers:
                 peer = self.peers[sid]
                 peer.ws = websocket
@@ -493,10 +490,6 @@ class Server:
                 self._bg_tasks.add(asyncio.create_task(self._listen_server(self.peers[sid]), name=f"listen-{sid}"))
 
             self.server_addrs[sid] = (payload.host, payload.port)
-
-            if config.is_introducer:
-                self.known_servers[sid] = {"host": payload.host, "port": payload.port, "pubkey": payload.pubkey}
-                logger.info(f"[INTRODUCER] Registered {sid} -> {payload.host}:{payload.port}")
         except Exception:
             logging.exception("[ANNOUNCE] failed")
 
@@ -518,7 +511,6 @@ class Server:
                     continue
 
                 mtype = data.get("type")
-                # any valid incoming message counts as alive
                 pr = self.peers.get(sid)
                 if pr:
                     pr.last_seen = time.time()
@@ -535,10 +527,8 @@ class Server:
                         await self._handle_server_goodbye(data)
                         break
                     elif mtype == MsgType.HEARTBEAT:
-                        # nothing else to do; last_seen already updated
                         pass
                     else:
-                        # ignore unknown types from servers, but log once
                         logger.debug(f"[LISTEN {sid}] unknown type: {mtype}")
                 except Exception:
                     logging.exception(f"[LISTEN {sid}] handler error")
@@ -552,21 +542,32 @@ class Server:
 
     # ---------- user side ----------
     async def _handle_user_connection(self, websocket: ServerConnection, first: dict):
+        user_id: Optional[str] = None
         try:
             await self._process_user_message(websocket, first)
+            if first.get("type") == MsgType.USER_HELLO:
+                user_id = first.get("from")
+
             async for raw in websocket:
                 try:
                     data = json.loads(raw)
                 except json.JSONDecodeError:
                     logging.exception("[USER] invalid JSON")
                     continue
+                if data.get("type") == MsgType.USER_HELLO:
+                    user_id = data.get("from")
                 await self._process_user_message(websocket, data)
-        except ConnectionClosedOK:
-            pass
-        except ConnectionClosedError:
+        except (ConnectionClosedOK, ConnectionClosedError):
             pass
         except Exception:
             logging.exception("[USER] error")
+        finally:
+            # On disconnect: remove local user and inform peers/locals
+            if user_id and self.local_users.pop(user_id, None):
+                self.user_locations.pop(user_id, None)
+                await self._broadcast_user_remove(user_id)
+                await self._broadcast_local_user_remove(user_id)
+                logger.info(f"[USER] disconnected: {user_id}")
 
     async def _process_user_message(self, websocket: ServerConnection, data: dict):
         msg = ProtocolMessage(**data)
@@ -579,12 +580,15 @@ class Server:
         elif msg.type == MsgType.COMMAND:
             await self._handle_command(websocket, msg)
         elif msg.type == MsgType.HEARTBEAT:
-            # ignore heartbeats from users (not expected), but it's fine
             pass
         else:
             await self._error_to(ws=websocket, code=ErrorCode.UNKNOWN_TYPE, detail=f"Unknown type {msg.type}")
 
     async def _user_hello(self, websocket: ServerConnection, msg: ProtocolMessage):
+        """
+        Register the user, then (crucially) send the existing roster so the new user
+        knows about earlier users (fixes Bob not seeing Alice).
+        """
         payload = UserHelloPayload(**msg.payload)
         user_id = msg.from_
         if user_id in self.local_users:
@@ -595,28 +599,122 @@ class Server:
         self.user_locations[user_id] = "local"
         self.db.add_user(user_id, payload.pubkey, "", "", {})
 
+        # 1) Send existing roster (local + remote) to the NEW user
+        await self._send_roster_to_user(websocket, exclude_user=user_id)
+
+        # 2) Gossip advertise to other servers
         await self._gossip_user_advertise(user_id, payload.pubkey)
+
+        # 3) Tell all local users (including the new one) about this new user
         await self._broadcast_local_user_advertise(user_id, payload.pubkey)
+
+    async def _send_roster_to_user(self, websocket: ServerConnection, exclude_user: Optional[str] = None):
+        """
+        Send USER_ADVERTISE for all known users (local + remote) to a single websocket.
+        This ensures a newly joined user learns about earlier users' pubkeys.
+        """
+        # Local users first
+        for uid in list(self.local_users.keys()):
+            if uid == exclude_user:
+                continue
+            rec = self.db.get_user(uid)
+            if not rec:
+                continue
+            advertise = {
+                "type": MsgType.USER_ADVERTISE,
+                "from": self.server_id,
+                "to": "*",
+                "ts": current_timestamp(),
+                "payload": {
+                    "user_id": uid,
+                    "server_id": self.server_id,
+                    "pubkey": rec["pubkey"],
+                    "meta": {}
+                },
+                "sig": ""
+            }
+            try:
+                await websocket.send(json.dumps(advertise))
+            except Exception:
+                logging.exception(f"[ROSTER] failed to send local user {uid}")
+
+        # Remote users (learned via gossip)
+        for uid, loc in list(self.user_locations.items()):
+            if loc == "local" or uid == exclude_user:
+                continue
+            rec = self.db.get_user(uid)
+            if not rec:
+                continue
+            try:
+                server_id = loc.split("_", 1)[1]
+            except Exception:
+                server_id = "unknown"
+
+            advertise = {
+                "type": MsgType.USER_ADVERTISE,
+                "from": self.server_id,
+                "to": "*",
+                "ts": current_timestamp(),
+                "payload": {
+                    "user_id": uid,
+                    "server_id": server_id,
+                    "pubkey": rec["pubkey"],
+                    "meta": {}
+                },
+                "sig": ""
+            }
+            try:
+                await websocket.send(json.dumps(advertise))
+            except Exception:
+                logging.exception(f"[ROSTER] failed to send remote user {uid}")
+
+    async def _broadcast_user_remove(self, user_id: str):
+        """Inform remote servers that a local user has gone away."""
+        payload = UserRemovePayload(user_id=user_id, server_id=self.server_id).model_dump()
+        for sid in list(self.peers.keys()):
+            msg = {
+                "type": MsgType.USER_REMOVE,
+                "from": self.server_id,
+                "to": sid,
+                "ts": current_timestamp(),
+                "payload": payload,
+                "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
+            }
+            await self._send_with_retry(sid, msg)
+
+    async def _broadcast_local_user_remove(self, user_id: str):
+        """Tell local clients a user has gone (optional UX consistency)."""
+        remove = {
+            "type": MsgType.USER_REMOVE,
+            "from": self.server_id,
+            "to": "*",
+            "ts": current_timestamp(),
+            "payload": {
+                "user_id": user_id,
+                "server_id": self.server_id
+            },
+            "sig": ""
+        }
+        for _, ws in list(self.local_users.items()):
+            try:
+                await ws.send(json.dumps(remove))
+            except (ConnectionClosedError, ConnectionClosedOK):
+                pass
+            except Exception:
+                logging.exception("[LOCAL-REMOVE] failed to send to client")
 
     async def _gossip_user_advertise(self, user_id: str, pubkey: str):
         payload = UserAdvertisePayload(user_id=user_id, server_id=self.server_id, pubkey=pubkey, meta={}).model_dump()
-        for sid, peer in list(self.peers.items()):
-            try:
-                msg = {
-                    "type": MsgType.USER_ADVERTISE,
-                    "from": self.server_id,
-                    "to": sid,
-                    "ts": current_timestamp(),
-                    "payload": payload,
-                    "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
-                }
-                await peer.ws.send(json.dumps(msg))
-            except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
-                logger.warning(f"[GOSSIP] {sid} closed during advertise")
-                await self._on_peer_closed(sid)
-            except Exception:
-                logging.exception(f"[GOSSIP] send to {sid} failed")
-                await self._on_peer_closed(sid)
+        for sid in list(self.peers.keys()):
+            msg = {
+                "type": MsgType.USER_ADVERTISE,
+                "from": self.server_id,
+                "to": sid,
+                "ts": current_timestamp(),
+                "payload": payload,
+                "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
+            }
+            await self._send_with_retry(sid, msg)
 
     async def _broadcast_local_user_advertise(self, user_id: str, pubkey: str):
         advertise = {
@@ -636,7 +734,6 @@ class Server:
             try:
                 await ws.send(json.dumps(advertise))
             except (ConnectionClosedError, ConnectionClosedOK):
-                # client dropped; will be cleaned up by GC or future presence pass
                 pass
             except Exception:
                 logging.exception("[LOCAL-ADV] failed to send to client")
@@ -671,32 +768,23 @@ class Server:
         loc = self.user_locations.get(target)
         if loc and loc.startswith("server_"):
             sid = loc.replace("server_", "")
-            peer = self.peers.get(sid)
-            if peer:
-                fwd = ServerDeliverPayload(
-                    user_id=target,
-                    ciphertext=payload.ciphertext,
-                    sender=msg.from_,
-                    sender_pub=payload.sender_pub,
-                    content_sig=payload.content_sig
-                ).model_dump()
-                out = {
-                    "type": MsgType.SERVER_DELIVER,
-                    "from": self.server_id,
-                    "to": sid,
-                    "ts": current_timestamp(),
-                    "payload": fwd,
-                    "sig": compute_transport_sig(load_private_key(self.server_private_key), fwd)
-                }
-                try:
-                    await peer.ws.send(json.dumps(out))
-                except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
-                    logger.warning(f"[DM] peer {sid} closed while forwarding")
-                    await self._on_peer_closed(sid)
-                except Exception:
-                    logging.exception(f"[DM] send to {sid} failed")
-                    await self._on_peer_closed(sid)
-                return
+            fwd = ServerDeliverPayload(
+                user_id=target,
+                ciphertext=payload.ciphertext,
+                sender=msg.from_,
+                sender_pub=payload.sender_pub,
+                content_sig=payload.content_sig
+            ).model_dump()
+            out = {
+                "type": MsgType.SERVER_DELIVER,
+                "from": self.server_id,
+                "to": sid,
+                "ts": current_timestamp(),
+                "payload": fwd,
+                "sig": compute_transport_sig(load_private_key(self.server_private_key), fwd)
+            }
+            await self._send_with_retry(sid, out)
+            return
 
         await _error_upstream(origin=msg.from_, code=ErrorCode.USER_NOT_FOUND, detail=f"{target} not registered")
 
@@ -727,7 +815,7 @@ class Server:
                 logging.exception(f"[PUB] local deliver to {uid} failed")
 
         # forward to other servers (fan-out)
-        for sid, peer in list(self.peers.items()):
+        for sid in list(self.peers.keys()):
             fwd = ServerDeliverPayload(
                 user_id="public",
                 ciphertext=payload.ciphertext,
@@ -743,14 +831,7 @@ class Server:
                 "payload": fwd,
                 "sig": compute_transport_sig(load_private_key(self.server_private_key), fwd)
             }
-            try:
-                await peer.ws.send(json.dumps(out))
-            except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
-                logger.warning(f"[PUB] peer {sid} closed while fanout")
-                await self._on_peer_closed(sid)
-            except Exception:
-                logging.exception(f"[PUB] fanout to {sid} failed")
-                await self._on_peer_closed(sid)
+            await self._send_with_retry(sid, out)
 
     async def _handle_user_advertise(self, data: dict):
         try:
@@ -847,10 +928,8 @@ if __name__ == "__main__":
     try:
         asyncio.run(srv.start())
     except KeyboardInterrupt:
-        # Handle Ctrl+C without traceback; do a best-effort graceful stop
         try:
             asyncio.run(srv.shutdown("keyboard"))
         except RuntimeError:
-            # Event loop already closed – nothing else to do
             pass
         print("\n[STOP] Bye.")
