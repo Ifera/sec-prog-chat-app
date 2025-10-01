@@ -9,17 +9,18 @@ from websockets.client import connect, WebSocketClientProtocol
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
 from websockets.server import WebSocketServerProtocol  # only for typing parity
 
+from config import config
 from crypto import (
     generate_rsa_keypair, load_private_key, load_public_key,
     rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig
 )
 from models import MsgType, current_timestamp, generate_uuid
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("SOCPClient")
+logging.basicConfig(level=config.logging_level)
+logger = logging.getLogger("Client")
 
 
-class SOCPClient:
+class Client:
     def __init__(self, server_host: str, server_port: int, reconnect_attempts: int = 3):
         self.server_uri = f"ws://{server_host}:{server_port}/ws"
         self.user_id: Optional[str] = None
@@ -60,7 +61,7 @@ class SOCPClient:
 
     async def _send_user_hello(self):
         assert self.websocket is not None, "websocket not connected"
-        hello_payload = {"client": "socp-client-v1.0", "pubkey": self.public_key_b64}
+        hello_payload = {"client": "client-v1.0", "pubkey": self.public_key_b64}
         hello_msg = {
             "type": MsgType.USER_HELLO,  # StrEnum -> JSON string
             "from": self.user_id,  # use alias name 'from' for clarity
@@ -214,8 +215,8 @@ class SOCPClient:
 
 async def interactive_client():
     # Resolve host/port/user from CLI or env; defaults align with server defaults.
-    host = os.getenv("SOCP_SERVER_HOST", "127.0.0.1")
-    port = int(os.getenv("SOCP_SERVER_PORT", "8080"))
+    host = os.getenv("SERVER_HOST", "127.0.0.1")
+    port = int(os.getenv("SERVER_PORT", "8080"))
     uid = None
 
     # CLI: python client.py [user_id] [host] [port]
@@ -229,7 +230,7 @@ async def interactive_client():
         except ValueError:
             logger.error("Invalid port: %s", sys.argv[3])
 
-    client = SOCPClient(server_host=host, server_port=port, reconnect_attempts=3)
+    client = Client(server_host=host, server_port=port, reconnect_attempts=3)
     client.init_user(uid)
 
     try:

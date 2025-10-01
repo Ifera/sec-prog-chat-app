@@ -29,8 +29,8 @@ from models import (
     current_timestamp, generate_uuid, CommandPayload
 )
 
-logging.basicConfig(level=logging.DEBUG)
-logger = logging.getLogger("SOCPServer")
+logging.basicConfig(level=config.logging_level)
+logger = logging.getLogger("Server")
 
 
 @dataclass
@@ -44,7 +44,7 @@ class Peer:
     missed: int = 0
 
 
-class SOCPServer:
+class Server:
     """
     UUID-only server IDs everywhere.
     Robust heartbeat that uses both app-level HEARTBEAT and ws.ping/pong.
@@ -902,7 +902,7 @@ class SOCPServer:
 
 
 if __name__ == "__main__":
-    srv = SOCPServer()
+    srv = Server()
     try:
         asyncio.run(srv.start())
     except KeyboardInterrupt:

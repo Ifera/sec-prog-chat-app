@@ -15,11 +15,11 @@ if "%HOST%"=="" set HOST=0.0.0.0
 set INTRO=%3
 if "%INTRO%"=="" set INTRO=introducers.json
 
-echo Starting SOCP Server @ %HOST%:%PORT%  (bootstrap via %INTRO%)
-set SOCP_IS_INTRODUCER=false
-set SOCP_HOST=%HOST%
-set SOCP_PORT=%PORT%
-set SOCP_INTRODUCERS_JSON=%INTRO%
+echo Starting Server @ %HOST%:%PORT%  (bootstrap via %INTRO%)
+set IS_INTRODUCER=false
+set HOST=%HOST%
+set PORT=%PORT%
+set INTRODUCERS_JSON=%INTRO%
 
 python server.py
 pause

@@ -1,4 +1,5 @@
 import json
+import logging
 import os
 from typing import List, Dict, Any
 
@@ -6,19 +7,20 @@ from typing import List, Dict, Any
 class Config:
     def __init__(self):
         # Core server settings
-        self.host: str = os.getenv("SOCP_HOST", "0.0.0.0")
-        self.port: int = int(os.getenv("SOCP_PORT", "8082"))
-        self.is_introducer: bool = os.getenv("SOCP_IS_INTRODUCER", "false").lower() == "true"
+        self.host: str = os.getenv("HOST", "0.0.0.0")
+        self.port: int = int(os.getenv("PORT", "8082"))
+        self.is_introducer: bool = os.getenv("IS_INTRODUCER", "false").lower() == "true"
+        self.logging_level = logging.DEBUG
 
         # DB
-        self.db_path: str = os.getenv("SOCP_DB_PATH", "socp.db")
+        self.db_path: str = os.getenv("DB_PATH", "chat.db")
 
         # Health
         self.heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # seconds
         self.timeout_threshold: int = int(os.getenv("TIMEOUT_THRESHOLD", "45"))  # seconds
 
         # Introducer JSON file (preferred)
-        introducer_json_path = os.getenv("SOCP_INTRODUCERS_JSON", "introducers.json")
+        introducer_json_path = os.getenv("INTRODUCERS_JSON", "introducers.json")
         self.bootstrap_servers: List[Dict[str, Any]] = []
         try:
             with open(introducer_json_path, "r", encoding="utf-8") as f:

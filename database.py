@@ -4,7 +4,7 @@ from typing import Optional, Dict, Any
 
 
 class Database:
-    def __init__(self, db_path: str = "socp.db"):
+    def __init__(self, db_path: str = "chat.db"):
         self.db_path = db_path
         self.init_db()
 

@@ -12,11 +12,11 @@ if "%PORT%"=="" set PORT=8000
 set INTRO=%2
 if "%INTRO%"=="" set INTRO=introducers.json
 
-echo Starting SOCP Introducer on port %PORT% using %INTRO%
-set SOCP_IS_INTRODUCER=true
-set SOCP_HOST=0.0.0.0
-set SOCP_PORT=%PORT%
-set SOCP_INTRODUCERS_JSON=%INTRO%
+echo Starting Introducer on port %PORT% using %INTRO%
+set IS_INTRODUCER=true
+set HOST=0.0.0.0
+set PORT=%PORT%
+set INTRODUCERS_JSON=%INTRO%
 
 python server.py
 pause
