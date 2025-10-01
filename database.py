@@ -1,6 +1,7 @@
-import sqlite3
 import json
+import sqlite3
 from typing import Optional, Dict, Any
+
 
 class Database:
     def __init__(self, db_path: str = "socp.db"):
@@ -11,50 +12,54 @@ class Database:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            # Users table
+            # Users
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS users (
-                    user_id TEXT PRIMARY KEY,
-                    pubkey TEXT NOT NULL,
-                    privkey_store TEXT NOT NULL,
-                    pake_password TEXT NOT NULL,
-                    meta TEXT,
-                    version INTEGER NOT NULL DEFAULT 1
-                )
-            ''')
+                           CREATE TABLE IF NOT EXISTS users
+                           (
+                               user_id       TEXT PRIMARY KEY,
+                               pubkey        TEXT    NOT NULL,
+                               privkey_store TEXT    NOT NULL,
+                               pake_password TEXT    NOT NULL,
+                               meta          TEXT,
+                               version       INTEGER NOT NULL DEFAULT 1
+                           )
+                           ''')
 
-            # Groups table (public channel is "public")
+            # Public channel + members
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS groups (
-                    group_id TEXT PRIMARY KEY,
-                    creator_id TEXT NOT NULL,
-                    created_at INTEGER,
-                    meta TEXT,
-                    version INTEGER NOT NULL DEFAULT 1
-                )
-            ''')
+                           CREATE TABLE IF NOT EXISTS groups
+                           (
+                               group_id   TEXT PRIMARY KEY,
+                               creator_id TEXT    NOT NULL,
+                               created_at INTEGER,
+                               meta       TEXT,
+                               version    INTEGER NOT NULL DEFAULT 1
+                           )
+                           ''')
 
             # Group members
             cursor.execute('''
-                CREATE TABLE IF NOT EXISTS group_members (
-                    group_id TEXT NOT NULL,
-                    member_id TEXT NOT NULL,
-                    role TEXT NOT NULL,
-                    wrapped_key TEXT NOT NULL,
-                    added_at INTEGER,
-                    PRIMARY KEY (group_id, member_id)
-                )
-            ''')
+                           CREATE TABLE IF NOT EXISTS group_members
+                           (
+                               group_id    TEXT NOT NULL,
+                               member_id   TEXT NOT NULL,
+                               role        TEXT NOT NULL,
+                               wrapped_key TEXT NOT NULL,
+                               added_at    INTEGER,
+                               PRIMARY KEY (group_id, member_id)
+                           )
+                           ''')
 
             # Initialize public channel if not exists
             cursor.execute("SELECT COUNT(*) FROM groups WHERE group_id = 'public'")
             if cursor.fetchone()[0] == 0:
                 import time
                 cursor.execute('''
-                    INSERT INTO groups (group_id, creator_id, created_at, meta, version)
-                    VALUES (?, ?, ?, ?, ?)
-                ''', ('public', 'system', int(time.time() * 1000), json.dumps({"title": "Public Channel"}), 1))
-
+                               INSERT INTO groups (group_id, creator_id, created_at, meta, version)
+                               VALUES (?, ?, ?, ?, ?)
+                               ''',
+                               ('public', 'system', int(time.time() * 1000), json.dumps({"title": "Public Channel"}),
+                                1))
             conn.commit()
 
     def get_user(self, user_id: str) -> Optional[Dict[str, Any]]:
@@ -88,10 +93,7 @@ class Database:
             cursor.execute("SELECT member_id, role, wrapped_key FROM group_members WHERE group_id = ?", (group_id,))
             members = {}
             for row in cursor.fetchall():
-                members[row[0]] = {
-                    "role": row[1],
-                    "wrapped_key": row[2]
-                }
+                members[row[0]] = {"role": row[1], "wrapped_key": row[2]}
             return members
 
     def add_group_member(self, group_id: str, member_id: str, role: str, wrapped_key: str):

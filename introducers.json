@@ -1,0 +1,19 @@
+{
+  "bootstrap_servers": [
+    {
+      "host": "127.0.0.1",
+      "port": 8000,
+      "pubkey": ""
+    },
+    {
+      "host": "127.0.0.1",
+      "port": 8001,
+      "pubkey": ""
+    },
+    {
+      "host": "127.0.0.1",
+      "port": 8002,
+      "pubkey": ""
+    }
+  ]
+}

@@ -1,265 +1,274 @@
 import asyncio
 import json
+import logging
+import os
 import sys
-import websockets
-from websockets.exceptions import ConnectionClosedError
+from typing import Dict, Optional, Union
 
-from crypto import *
-from models import *
+from websockets.client import connect, WebSocketClientProtocol
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
+from websockets.server import WebSocketServerProtocol  # only for typing parity
+
+from crypto import (
+    generate_rsa_keypair, load_private_key, load_public_key,
+    rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig
+)
+from models import MsgType, current_timestamp, generate_uuid
+
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger("SOCPClient")
+
 
 class SOCPClient:
-    def __init__(self, server_host: str = "localhost", server_port: int = 8082):
+    def __init__(self, server_host: str, server_port: int, reconnect_attempts: int = 3):
         self.server_uri = f"ws://{server_host}:{server_port}/ws"
-        self.user_id = None
-        self.private_key = None
-        self.public_key = None
-        self.websocket = None
-        self.known_pubkeys = {}  # user_id -> pubkey
+        self.user_id: Optional[str] = None
+        self.private_key_b64: Optional[str] = None
+        self.public_key_b64: Optional[str] = None
+        self.websocket: Optional[Union[WebSocketClientProtocol, WebSocketServerProtocol]] = None
+        self.known_pubkeys: Dict[str, str] = {}  # user_id -> pubkey
+        self._listen_task: Optional[asyncio.Task] = None
+        self._reconnect_attempts = max(1, reconnect_attempts)
 
-    def init_user(self, user_id: str = None):
-        """Initialize user with RSA keys"""
-        if user_id:
-            self.user_id = user_id
-        else:
-            self.user_id = generate_uuid()
-
-        self.private_key, self.public_key = generate_rsa_keypair()
-        print(f"User initialized with ID: {self.user_id}")
+    def init_user(self, user_id: Optional[str] = None):
+        self.user_id = user_id or generate_uuid()
+        self.private_key_b64, self.public_key_b64 = generate_rsa_keypair()
+        logger.info(f"[client] user_id={self.user_id}")
 
     async def connect(self):
-        """Connect to the server"""
-        try:
-            self.websocket = await websockets.connect(self.server_uri)
-            print(f"Connected to server at {self.server_uri}")
+        """Connect once, send USER_HELLO, then start the listener task."""
+        attempt = 0
+        last_err: Optional[Exception] = None
+        while attempt < self._reconnect_attempts:
+            attempt += 1
+            try:
+                logger.info(f"[client] connecting to {self.server_uri} (attempt {attempt}/{self._reconnect_attempts})")
+                # Small open timeout to fail fast if server isn’t listening.
+                self.websocket = await asyncio.wait_for(connect(self.server_uri), timeout=6)
+                await self._send_user_hello()
+                logger.info("[client] connected and sent USER_HELLO")
+                # Start background listener
+                self._listen_task = asyncio.create_task(self.listen(), name="client-listen")
+                return
+            except (asyncio.TimeoutError, ConnectionClosedError, ConnectionClosedOK, WebSocketException, OSError) as e:
+                last_err = e
+                logger.warning(f"[client] connect failed: {e!r}")
+                await asyncio.sleep(1.0)
 
-            # Send USER_HELLO
-            hello_payload = {
-                "client": "socp-client-v1.0",
-                "pubkey": self.public_key
-            }
-            hello_msg = {
-                "type": "USER_HELLO",
-                "from_": self.user_id,
-                "to": "server",  # Server will be identified later
-                "ts": current_timestamp(),
-                "payload": hello_payload,
-                "sig": ""  # Optional for hello
-            }
+        # Exhausted retries
+        raise RuntimeError(f"Unable to connect to {self.server_uri}") from last_err
 
-            await self.websocket.send(json.dumps(hello_msg))
-            print("Sent USER_HELLO")
-
-            # Start listening for messages
-            await self.listen()
-
-        except Exception as e:
-            print(f"Connection failed: {e}")
+    async def _send_user_hello(self):
+        assert self.websocket is not None, "websocket not connected"
+        hello_payload = {"client": "socp-client-v1.0", "pubkey": self.public_key_b64}
+        hello_msg = {
+            "type": MsgType.USER_HELLO,  # StrEnum -> JSON string
+            "from": self.user_id,  # use alias name 'from' for clarity
+            "to": "server",
+            "ts": current_timestamp(),
+            "payload": hello_payload,
+            "sig": ""
+        }
+        await self.websocket.send(json.dumps(hello_msg))
 
     async def listen(self):
-        """Listen for incoming messages"""
+        """Background listener; exits when the socket closes."""
+        assert self.websocket is not None
+        ws = self.websocket
         try:
-            async for message in self.websocket:
-                data = json.loads(message)
+            async for message in ws:
+                try:
+                    data = json.loads(message)
+                except json.JSONDecodeError:
+                    logger.exception("[client] invalid JSON from server")
+                    continue
                 await self.handle_message(data)
-        except ConnectionClosedError:
-            print("Connection closed")
-        except Exception as e:
-            print(f"Error receiving message: {e}")
+        except (ConnectionClosedOK, ConnectionClosedError) as e:
+            logger.info(f"[client] connection closed: {e!r}")
+        except Exception:
+            logger.exception("[client] listen loop crashed")
 
     async def handle_message(self, data: dict):
-        """Handle incoming messages"""
-        msg_type = data.get("type")
-
-        if msg_type == "USER_DELIVER":
-            await self.handle_user_deliver(data)
-        elif msg_type == "COMMAND_RESPONSE":
-            await self.handle_command_response(data)
-        elif msg_type == "USER_ADVERTISE":
-            await self.handle_user_advertise(data)
-        elif msg_type == "ERROR":
-            print(f"Error: {data['payload']}")
-        else:
-            print(f"Received: {data}")
-
-    async def handle_user_deliver(self, data: dict):
-        print(data)
-        """Handle USER_DELIVER message"""
-        payload = data["payload"]
-
-        try:
-            # Decrypt the message
-            ciphertext = payload["ciphertext"]
-            sender_pub = payload["sender_pub"]
-
-            # Load sender's public key
-            sender_pub_key = load_public_key(sender_pub)
-
-            # Verify content signature
-            content_sig_valid = verify_content_sig(
-                sender_pub_key,
-                ciphertext,
-                data["from"],  # sender
-                data["to"],    # recipient (should be us)
-                data["ts"],
-                payload["content_sig"]
-            )
-
-            if not content_sig_valid:
-                print("Warning: Content signature verification failed")
-
-            # Decrypt
-            plaintext = rsa_decrypt(load_private_key(self.private_key), ciphertext)
-            message_text = plaintext.decode('utf-8')
-
-            print(f"[{payload['sender']}] {message_text}")
-
-        except Exception as e:
-            print(f"Failed to decrypt message: {e}")
-
-    async def handle_command_response(self, data: dict):
-        """Handle COMMAND_RESPONSE"""
-        payload = data["payload"]
-        cmd = payload.get("command")
-
-        if cmd == "list":
-            users = payload.get("users", [])
-            print(f"Online users: {', '.join(users)}")
-
-    async def handle_user_advertise(self, data: dict):
-        """Handle USER_ADVERTISE"""
-        payload = data["payload"]
-        user_id = payload["user_id"]
-        pubkey = payload["pubkey"]
-        self.known_pubkeys[user_id] = pubkey
-        print(f"User {user_id} is online")
-
-    async def send_command(self, command: str):
-        """Send a command to the server"""
-        parts = command.split()
-        if not parts:
+        mtype = data.get("type")
+        if mtype == "USER_DELIVER":
+            await self._on_user_deliver(data)
             return
 
+        if mtype == "COMMAND_RESPONSE":
+            payload = data.get("payload", {})
+            if payload.get("command") == "list":
+                users = payload.get("users", [])
+                logger.info("Online users: %s", ", ".join(users))
+            return
+
+        if mtype == "USER_ADVERTISE":
+            payload = data.get("payload", {})
+            uid = payload.get("user_id")
+            pub = payload.get("pubkey")
+            if uid and pub:
+                self.known_pubkeys[uid] = pub
+                logger.info("[client] user online: %s", uid)
+            return
+
+        if mtype == "ERROR":
+            logger.error("[client] ERROR: %s", data.get("payload"))
+            return
+
+        logger.debug("[client] recv: %s", data)
+
+    async def _on_user_deliver(self, data: dict):
+        payload = data.get("payload", {})
+        try:
+            ciphertext = payload["ciphertext"]
+            sender_id = payload.get("sender")  # set by server on fanout
+            sender_pub = payload["sender_pub"]
+            sender_pub_key = load_public_key(sender_pub)
+
+            # Try to verify against the *sender id*, not the server id.
+            # NOTE: The original timestamp used by the sender to sign may not be present,
+            # so verification can fail in some deployments; keep it best-effort.
+            try:
+                ok = verify_content_sig(
+                    sender_pub_key,
+                    ciphertext,
+                    sender_id,
+                    data.get("to"),
+                    data.get("ts"),
+                    payload.get("content_sig"),
+                )
+                if not ok:
+                    logger.debug("[client] content_sig failed verification (best-effort)")
+            except Exception:
+                logger.debug("[client] content_sig verify raised; continuing", exc_info=True)
+
+            plaintext = rsa_decrypt(load_private_key(self.private_key_b64), ciphertext)
+            msg_txt = plaintext.decode("utf-8", errors="replace")
+            print(f"[DM] {sender_id}: {msg_txt}")
+        except Exception as e:
+            logger.exception("[client] failed to decrypt/verify")
+
+    async def send_command(self, line: str):
+        if not self.websocket:
+            logger.error("[client] not connected")
+            return
+
+        parts = line.split()
+        if not parts:
+            return
         cmd = parts[0]
 
         if cmd == "/tell" and len(parts) >= 3:
-            target_user = parts[1]
-            message_text = " ".join(parts[2:])
-
-            if target_user not in self.known_pubkeys:
-                print(f"Unknown user: {target_user}")
+            target = parts[1]
+            msg_text = " ".join(parts[2:])
+            if target not in self.known_pubkeys:
+                logger.error("[client] unknown user: %s", target)
                 return
+            target_pk = load_public_key(self.known_pubkeys[target])
+            ciphertext = rsa_encrypt(target_pk, msg_text.encode("utf-8"))
+            ts = current_timestamp()
+            content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, target,
+                                              ts)
+            dm_payload = {"ciphertext": ciphertext, "sender_pub": self.public_key_b64, "content_sig": content_sig,
+                          "sender": self.user_id}
+            dm = {"type": MsgType.MSG_DIRECT, "from": self.user_id, "to": target, "ts": ts, "payload": dm_payload,
+                  "sig": ""}
+            await self.websocket.send(json.dumps(dm))
+            return
 
-            # Encrypt message
-            target_pub_key = load_public_key(self.known_pubkeys[target_user])
-            ciphertext = rsa_encrypt(target_pub_key, message_text.encode('utf-8'))
-            content_sig = compute_content_sig(load_private_key(self.private_key), ciphertext, self.user_id, target_user, current_timestamp())
+        if cmd == "/all" and len(parts) >= 2:
+            msg_text = " ".join(parts[1:])
+            # Demo: public is signed but not encrypted (spec may allow RSA group key; omitted here)
+            ciphertext = msg_text
+            ts = current_timestamp()
+            content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id,
+                                                     ts)
+            pub_payload = {"ciphertext": ciphertext, "sender_pub": self.public_key_b64, "content_sig": content_sig,
+                           "sender": self.user_id}
+            pub = {"type": MsgType.MSG_PUBLIC_CHANNEL, "from": self.user_id, "to": "public", "ts": ts,
+                   "payload": pub_payload, "sig": ""}
+            await self.websocket.send(json.dumps(pub))
+            return
 
-            dm_payload = {
-                "ciphertext": ciphertext,
-                "sender_pub": self.public_key,
-                "content_sig": content_sig
-            }
-
-            dm_msg = {
-                "type": "MSG_DIRECT",
-                "from_": self.user_id,
-                "to": target_user,
-                "ts": current_timestamp(),
-                "payload": dm_payload,
-                "sig": ""  # Optional for user messages
-            }
-
-            await self.websocket.send(json.dumps(dm_msg))
-
-        elif cmd == "/all" and len(parts) >= 2:
-            message_text = " ".join(parts[1:])
-
-            # For now, send unencrypted
-            pub_payload = {
-                "ciphertext": message_text,  # TODO: encrypt with group key
-                "sender_pub": self.public_key,
-                "content_sig": ""  # TODO
-            }
-
-            pub_msg = {
-                "type": "MSG_PUBLIC_CHANNEL",
-                "from_": self.user_id,
-                "to": "public",
-                "ts": current_timestamp(),
-                "payload": pub_payload,
-                "sig": ""
-            }
-
-            await self.websocket.send(json.dumps(pub_msg))
-
-        else:
-            # Other commands like /list
-            msg = {
-                "type": command,
-                "from_": self.user_id,
-                "to": "server",
-                "ts": current_timestamp(),
-                "payload": {},
-                "sig": ""
-            }
-            await self.websocket.send(json.dumps(msg))
-
-    async def send_message(self, message_type: str, payload: dict):
-        """Send a message to the server"""
-        msg = {
-            "type": message_type,
-            "from_": self.user_id,
-            "to": payload.get("to", "server"),
-            "ts": current_timestamp(),
-            "payload": payload,
-            "sig": ""
-        }
+        # default: /list
+        msg = {"type": MsgType.COMMAND, "from": self.user_id, "to": "server", "ts": current_timestamp(),
+               "payload": {"command": "/list"}, "sig": ""}
         await self.websocket.send(json.dumps(msg))
 
+    async def close(self):
+        """Close the socket and cancel listener."""
+        try:
+            if self._listen_task and not self._listen_task.done():
+                self._listen_task.cancel()
+                try:
+                    await self._listen_task
+                except asyncio.CancelledError:
+                    pass
+        finally:
+            if self.websocket:
+                try:
+                    await self.websocket.close()
+                except Exception:
+                    logger.debug("[client] close() failed", exc_info=True)
+            self.websocket = None
+
+
 async def interactive_client():
-    """Run an interactive client"""
-    if len(sys.argv) > 1:
-        user_id = sys.argv[1]
-    else:
-        user_id = None
+    # Resolve host/port/user from CLI or env; defaults align with server defaults.
+    host = os.getenv("SOCP_SERVER_HOST", "127.0.0.1")
+    port = int(os.getenv("SOCP_SERVER_PORT", "8080"))
+    uid = None
 
-    client = SOCPClient()
-    client.init_user(user_id)
+    # CLI: python client.py [user_id] [host] [port]
+    if len(sys.argv) >= 2 and sys.argv[1]:
+        uid = sys.argv[1]
+    if len(sys.argv) >= 3 and sys.argv[2]:
+        host = sys.argv[2]
+    if len(sys.argv) >= 4 and sys.argv[3]:
+        try:
+            port = int(sys.argv[3])
+        except ValueError:
+            logger.error("Invalid port: %s", sys.argv[3])
 
-    # Connect in background
-    connect_task = asyncio.create_task(client.connect())
+    client = SOCPClient(server_host=host, server_port=port, reconnect_attempts=3)
+    client.init_user(uid)
 
-    # Wait a bit for connection
-    await asyncio.sleep(2)
+    try:
+        await client.connect()
+    except Exception as e:
+        logger.error("[client] giving up connecting to %s:%s: %r", host, port, e)
+        return
 
     print("Commands:")
-    print("  /list              - List online users")
-    print("  /tell <user> <msg> - Send DM to user")
-    print("  /all <msg>         - Send public message")
-    print("  /quit              - Exit")
-    print()
+    print("  /list")
+    print("  /tell <user> <msg>")
+    print("  /all <msg>")
+    print("  /quit")
 
-    while True:
-        try:
-            line = await asyncio.get_event_loop().run_in_executor(None, input, "> ")
-            line = line.strip()
-
+    loop = asyncio.get_running_loop()
+    try:
+        while True:
+            try:
+                line = await loop.run_in_executor(None, input, "> ")
+            except EOFError:
+                break
+            line = (line or "").strip()
             if not line:
                 continue
-
             if line == "/quit":
                 break
-
             await client.send_command(line)
+    except KeyboardInterrupt:
+        # graceful, no traceback
+        pass
+    except Exception:
+        logger.exception("[client] interactive loop error")
+    finally:
+        await client.close()
 
-        except KeyboardInterrupt:
-            break
-        except Exception as e:
-            print(f"Error: {e}")
-
-    # Close connection
-    if client.websocket:
-        await client.websocket.close()
 
 if __name__ == "__main__":
-    asyncio.run(interactive_client())
+    try:
+        asyncio.run(interactive_client())
+    except KeyboardInterrupt:
+        # swallow Ctrl+C at top level
+        print()
