@@ -34,7 +34,7 @@ class Client:
     def init_user(self, user_id: Optional[str] = None):
         self.user_id = user_id or generate_uuid()
         self.private_key_b64, self.public_key_b64 = generate_rsa_keypair()
-        logger.info(f"[client] user_id={self.user_id}")
+        logger.info(f"user_id={self.user_id}")
 
     async def connect(self):
         """Connect once, send USER_HELLO, then start the listener task."""
@@ -43,17 +43,17 @@ class Client:
         while attempt < self._reconnect_attempts:
             attempt += 1
             try:
-                logger.info(f"[client] connecting to {self.server_uri} (attempt {attempt}/{self._reconnect_attempts})")
+                logger.info(f"connecting to {self.server_uri} (attempt {attempt}/{self._reconnect_attempts})")
                 # Small open timeout to fail fast if server isn’t listening.
                 self.websocket = await asyncio.wait_for(connect(self.server_uri), timeout=6)
                 await self._send_user_hello()
-                logger.info("[client] connected and sent USER_HELLO")
+                logger.info("connected and sent USER_HELLO")
                 # Start background listener
                 self._listen_task = asyncio.create_task(self.listen(), name="client-listen")
                 return
             except (asyncio.TimeoutError, ConnectionClosedError, ConnectionClosedOK, WebSocketException, OSError) as e:
                 last_err = e
-                logger.warning(f"[client] connect failed: {e!r}")
+                logger.warning(f"connect failed: {e!r}")
                 await asyncio.sleep(1.0)
 
         # Exhausted retries
@@ -81,13 +81,13 @@ class Client:
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
-                    logger.exception("[client] invalid JSON from server")
+                    logger.exception("invalid JSON from server")
                     continue
                 await self.handle_message(data)
         except (ConnectionClosedOK, ConnectionClosedError) as e:
-            logger.info(f"[client] connection closed: {e!r}")
+            logger.info(f"connection closed: {e!r}")
         except Exception:
-            logger.exception("[client] listen loop crashed")
+            logger.exception("listen loop crashed")
 
     async def handle_message(self, data: dict):
         mtype = data.get("type")
@@ -108,14 +108,14 @@ class Client:
             pub = payload.get("pubkey")
             if uid and pub:
                 self.known_pubkeys[uid] = pub
-                logger.info("[client] user online: %s", uid)
+                logger.info("user online: %s", uid)
             return
 
         if mtype == "ERROR":
-            logger.error("[client] ERROR: %s", data.get("payload"))
+            logger.error("ERROR: %s", data.get("payload"))
             return
 
-        logger.debug("[client] recv: %s", data)
+        logger.debug("recv: %s", data)
 
     async def _on_user_deliver(self, data: dict):
         payload = data.get("payload", {})
@@ -138,19 +138,19 @@ class Client:
                     payload.get("content_sig"),
                 )
                 if not ok:
-                    logger.debug("[client] content_sig failed verification (best-effort)")
+                    logger.debug("content_sig failed verification (best-effort)")
             except Exception:
-                logger.debug("[client] content_sig verify raised; continuing", exc_info=True)
+                logger.debug("content_sig verify raised; continuing", exc_info=True)
 
             plaintext = rsa_decrypt(load_private_key(self.private_key_b64), ciphertext)
             msg_txt = plaintext.decode("utf-8", errors="replace")
             print(f"[DM] {sender_id}: {msg_txt}")
         except Exception as e:
-            logger.exception("[client] failed to decrypt/verify")
+            logger.exception("failed to decrypt/verify")
 
     async def send_command(self, line: str):
         if not self.websocket:
-            logger.error("[client] not connected")
+            logger.error("not connected")
             return
 
         parts = line.split()
@@ -162,7 +162,7 @@ class Client:
             target = parts[1]
             msg_text = " ".join(parts[2:])
             if target not in self.known_pubkeys:
-                logger.error("[client] unknown user: %s", target)
+                logger.error("unknown user: %s", target)
                 return
             target_pk = load_public_key(self.known_pubkeys[target])
             ciphertext = rsa_encrypt(target_pk, msg_text.encode("utf-8"))
@@ -209,7 +209,7 @@ class Client:
                 try:
                     await self.websocket.close()
                 except Exception:
-                    logger.debug("[client] close() failed", exc_info=True)
+                    logger.debug("close() failed", exc_info=True)
             self.websocket = None
 
 
@@ -236,7 +236,7 @@ async def interactive_client():
     try:
         await client.connect()
     except Exception as e:
-        logger.error("[client] giving up connecting to %s:%s: %r", host, port, e)
+        logger.error("giving up connecting to %s:%s: %r", host, port, e)
         return
 
     print("Commands:")
@@ -262,7 +262,7 @@ async def interactive_client():
         # graceful, no traceback
         pass
     except Exception:
-        logger.exception("[client] interactive loop error")
+        logger.exception("interactive loop error")
     finally:
         await client.close()
 

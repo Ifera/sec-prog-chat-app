@@ -57,7 +57,10 @@ class BaseServer:
         self.init_server()
 
         await self.on_start()
-        self._bg_tasks.add(asyncio.create_task(self._health_monitor(), name="health-monitor"))
+
+        if self.ping_interval is None and self.ping_timeout is None:
+            self._bg_tasks.add(asyncio.create_task(self._health_monitor(), name="health-monitor"))
+            self.logger.info("[HEALTH] Health monitor registered")
 
         async with serve(
                 self._incoming,
@@ -195,7 +198,7 @@ class BaseServer:
             first_raw = await websocket.recv()
             data = json.loads(first_raw)
             req_type = data.get("type")
-            self.logger.info(f"[INCOMING] Request: {req_type}")
+            self.logger.info(f"[INCOMING] Request Type: {req_type}")
             await self.handle_incoming(websocket, req_type, data)
         except (ConnectionClosedError, ConnectionClosedOK):
             pass
