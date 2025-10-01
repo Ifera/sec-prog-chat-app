@@ -5,9 +5,9 @@ import os
 import sys
 from typing import Dict, Optional, Union
 
-from websockets.client import connect, WebSocketClientProtocol
+from websockets.asyncio.client import connect, ClientConnection
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
-from websockets.server import WebSocketServerProtocol  # only for typing parity
+from websockets.asyncio.server import ServerConnection
 
 from config import config
 from crypto import (
@@ -26,7 +26,7 @@ class Client:
         self.user_id: Optional[str] = None
         self.private_key_b64: Optional[str] = None
         self.public_key_b64: Optional[str] = None
-        self.websocket: Optional[Union[WebSocketClientProtocol, WebSocketServerProtocol]] = None
+        self.websocket: Optional[Union[ClientConnection, ServerConnection]] = None
         self.known_pubkeys: Dict[str, str] = {}  # user_id -> pubkey
         self._listen_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = max(1, reconnect_attempts)

@@ -7,13 +7,13 @@ from dataclasses import dataclass, field
 from typing import Dict, Tuple, Optional
 from typing import Union
 
-from websockets.client import connect, WebSocketClientProtocol
+from websockets.asyncio.client import connect, ClientConnection
+from websockets.asyncio.server import serve, ServerConnection
 from websockets.exceptions import (
     ConnectionClosedError,
     ConnectionClosedOK,
     WebSocketException,
 )
-from websockets.server import serve, WebSocketServerProtocol
 
 from config import config
 from crypto import generate_rsa_keypair, load_private_key, compute_transport_sig
@@ -36,7 +36,7 @@ logger = logging.getLogger("Server")
 @dataclass
 class Peer:
     sid: str
-    ws: Union[WebSocketClientProtocol, WebSocketServerProtocol]  # ← allow both
+    ws: Union[ClientConnection, ServerConnection]
     host: str
     port: int
     pubkey: Optional[str] = None
@@ -44,12 +44,11 @@ class Peer:
     missed: int = 0
 
 
+async def _error_upstream(origin: str, code: ErrorCode, detail: str):
+    logger.warning(f"[ERROR-UP] {code}: {detail}")
+
+
 class Server:
-    """
-    UUID-only server IDs everywhere.
-    Robust heartbeat that uses both app-level HEARTBEAT and ws.ping/pong.
-    No exceptions are silently swallowed; we log with traceback and clean up.
-    """
 
     def __init__(self):
         self.server_id: Optional[str] = None
@@ -64,7 +63,7 @@ class Server:
         self.server_addrs: Dict[str, Tuple[str, int]] = {}  # sid -> (host, port)
 
         # local presence + routing
-        self.local_users: Dict[str, WebSocketServerProtocol] = {}  # user_id -> ws
+        self.local_users: Dict[str, ServerConnection] = {}  # user_id -> ws
         self.user_locations: Dict[str, str] = {}  # user_id -> "local" | f"server_{sid}"
 
         # introducer directory (only used if this is an introducer)
@@ -222,7 +221,7 @@ class Server:
         """Create a persistent websocket to another server and send SERVER_ANNOUNCE."""
         uri = f"ws://{host}:{port}/ws"
         try:
-            ws = await connect(uri)
+            ws: ClientConnection = await connect(uri)
             peer = Peer(sid=sid, ws=ws, host=host, port=port, pubkey=pubkey)
             self.peers[sid] = peer
             self.server_addrs[sid] = (host, port)
@@ -330,61 +329,6 @@ class Server:
             except Exception:
                 logging.exception(f"[PROBE] close failed for {sid}")
 
-    # async def _health_monitor(self):
-    #     """
-    #     Every HEARTBEAT_INTERVAL seconds:
-    #       1) ws.ping(), wait max 5s for pong
-    #       2) send app-level HEARTBEAT message
-    #       3) if now - last_seen > TIMEOUT_THRESHOLD, drop peer (and remove from introducer if applicable)
-    #     """
-    #     hb_interval = max(3, int(config.heartbeat_interval))
-    #     timeout_s = max(hb_interval * 2, int(config.timeout_threshold))
-    #
-    #     while not self._stop_evt.is_set():
-    #         start = time.time()
-    #         for sid, peer in list(self.peers.items()):
-    #             try:
-    #                 # 1) transport-level ping/pong
-    #                 pong_waiter = peer.ws.ping()
-    #                 await asyncio.wait_for(pong_waiter, timeout=5)
-    #
-    #                 # 2) app-level heartbeat
-    #                 hb = {
-    #                     "type": MsgType.HEARTBEAT,
-    #                     "from": self.server_id,
-    #                     "to": sid,
-    #                     "ts": current_timestamp(),
-    #                     "payload": HeartbeatPayload().model_dump(),
-    #                     "sig": "",
-    #                 }
-    #                 await peer.ws.send(json.dumps(hb))
-    #
-    #                 # 3) timeout check
-    #                 if time.time() - peer.last_seen > timeout_s:
-    #                     logger.warning(f"[HEALTH] {sid} timed out (last_seen={peer.last_seen:.0f})")
-    #                     await self._on_peer_closed(sid, timed_out=True)
-    #                     continue
-    #
-    #                 # reset missed on successful cycle
-    #                 peer.missed = 0
-    #
-    #             except asyncio.TimeoutError:
-    #                 peer.missed += 1
-    #                 logger.warning(f"[HEALTH] {sid} missed pong (missed={peer.missed})")
-    #                 if time.time() - peer.last_seen > timeout_s or peer.missed >= 2:
-    #                     await self._on_peer_closed(sid, timed_out=True)
-    #             except (ConnectionClosedError, ConnectionClosedOK, WebSocketException) as e:
-    #                 logger.warning(f"[HEALTH] {sid} closed: {e!r}")
-    #                 await self._on_peer_closed(sid)
-    #             except Exception as e:
-    #                 logging.exception(f"[HEALTH] error with {sid}")
-    #                 logger.exception(f"[HEALTH] {sid} failed: {e!r}")
-    #                 await self._on_peer_closed(sid)
-    #
-    #         # sleep the remainder of the interval
-    #         elapsed = time.time() - start
-    #         await asyncio.sleep(max(0.0, hb_interval - elapsed))
-
     async def _health_monitor(self):
         """
         Every HEARTBEAT_INTERVAL seconds:
@@ -456,7 +400,7 @@ class Server:
         self.server_addrs.pop(sid, None)
 
     # ---------- incoming handling ----------
-    async def _incoming(self, websocket: WebSocketServerProtocol, path: str):
+    async def _incoming(self, websocket: ServerConnection):
         try:
             first_raw = await websocket.recv()
             first = json.loads(first_raw)
@@ -487,7 +431,7 @@ class Server:
         except Exception:
             logging.exception("[INCOMING] error in first frame handling")
 
-    async def _handle_server_join(self, websocket: WebSocketServerProtocol, data: dict):
+    async def _handle_server_join(self, websocket: ServerConnection, data: dict):
         try:
             payload = ServerHelloJoinPayload(**data["payload"])
 
@@ -529,7 +473,7 @@ class Server:
         except Exception:
             logging.exception("[JOIN] failed to handle server join")
 
-    async def _handle_server_announce(self, websocket: WebSocketServerProtocol, data: dict):
+    async def _handle_server_announce(self, websocket: ServerConnection, data: dict):
         try:
             payload = ServerAnnouncePayload(**data["payload"])
             sid = data["from"]
@@ -607,7 +551,7 @@ class Server:
             logging.exception(f"[LISTEN {sid}] unexpected failure")
 
     # ---------- user side ----------
-    async def _handle_user_connection(self, websocket: WebSocketServerProtocol, first: dict):
+    async def _handle_user_connection(self, websocket: ServerConnection, first: dict):
         try:
             await self._process_user_message(websocket, first)
             async for raw in websocket:
@@ -624,7 +568,7 @@ class Server:
         except Exception:
             logging.exception("[USER] error")
 
-    async def _process_user_message(self, websocket: WebSocketServerProtocol, data: dict):
+    async def _process_user_message(self, websocket: ServerConnection, data: dict):
         msg = ProtocolMessage(**data)
         if msg.type == MsgType.USER_HELLO:
             await self._user_hello(websocket, msg)
@@ -640,7 +584,7 @@ class Server:
         else:
             await self._error_to(ws=websocket, code=ErrorCode.UNKNOWN_TYPE, detail=f"Unknown type {msg.type}")
 
-    async def _user_hello(self, websocket: WebSocketServerProtocol, msg: ProtocolMessage):
+    async def _user_hello(self, websocket: ServerConnection, msg: ProtocolMessage):
         payload = UserHelloPayload(**msg.payload)
         user_id = msg.from_
         if user_id in self.local_users:
@@ -754,7 +698,7 @@ class Server:
                     await self._on_peer_closed(sid)
                 return
 
-        await self._error_upstream(origin=msg.from_, code=ErrorCode.USER_NOT_FOUND, detail=f"{target} not registered")
+        await _error_upstream(origin=msg.from_, code=ErrorCode.USER_NOT_FOUND, detail=f"{target} not registered")
 
     async def _msg_public(self, msg: ProtocolMessage):
         payload = MsgPublicChannelPayload(**msg.payload)
@@ -860,7 +804,7 @@ class Server:
             logging.exception("[FWD] server_deliver failed")
 
     # ---------- commands ----------
-    async def _handle_command(self, websocket: WebSocketServerProtocol, msg: ProtocolMessage):
+    async def _handle_command(self, websocket: ServerConnection, msg: ProtocolMessage):
         payload = CommandPayload(**msg.payload)
         cmd = payload.command.strip().lower()
         if cmd == "/list":
@@ -882,7 +826,7 @@ class Server:
                 logging.exception("[CMD] /list response failed")
 
     # ---------- utilities ----------
-    async def _error_to(self, ws: WebSocketServerProtocol, code: ErrorCode, detail: str):
+    async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):
         payload = ErrorPayload(code=code, detail=detail).model_dump()
         out = {
             "type": MsgType.ERROR,
@@ -896,9 +840,6 @@ class Server:
             await ws.send(json.dumps(out))
         except Exception:
             logging.exception("[ERROR->client] failed to send error")
-
-    async def _error_upstream(self, origin: str, code: ErrorCode, detail: str):
-        logger.warning(f"[ERROR-UP] {code}: {detail}")
 
 
 if __name__ == "__main__":
