@@ -222,21 +222,44 @@ class Server(BaseServer):
             self.logger.info(f"[INCOMING] Request: {data}")
 
         match req_type:
-            case MsgType.USER_ADVERTISE:
-                await self._handle_user_advertise(data)
-            case MsgType.USER_REMOVE:
-                await self._handle_user_remove(data)
             case MsgType.SERVER_DELIVER:
                 await self._handle_server_deliver(data)
-            case MsgType.SERVER_GOODBYE:
-                await self._handle_server_goodbye(data)
             case MsgType.SERVER_ANNOUNCE:
                 await self._handle_server_announce(websocket, data)
             case MsgType.SERVER_GOODBYE:
                 await self._handle_server_goodbye(data)
                 await websocket.close()
+            case MsgType.USER_ADVERTISE:
+                await self._handle_user_advertise(data)
+            case MsgType.USER_REMOVE:
+                await self._handle_user_remove(data)
+                await websocket.close()
             case _:  # assume user message
                 await self._handle_user_connection(websocket, req_type, data)
+
+    async def _handle_server_deliver(self, data: ProtocolMessage):
+        try:
+            payload = ServerDeliverPayload(**data.payload)
+            key = f"{data.ts}_{data.from_}_{data.to}_{hash(json.dumps(data.payload, sort_keys=True))}"
+            if key in self.seen_ids:
+                return
+            self.seen_ids.add(key)
+
+            if payload.user_id in self.local_users:
+                deliver_pl = UserDeliverPayload(
+                    ciphertext=payload.ciphertext,
+                    sender=payload.sender,
+                    sender_pub=payload.sender_pub,
+                    content_sig=payload.content_sig
+                ).model_dump()
+                sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
+                req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig)
+                try:
+                    await self.local_users[payload.user_id].send(req)
+                except Exception as e:
+                    self.logger.error(f"[FWD] deliver to {payload.user_id} failed: {e!r}")
+        except Exception as e:
+            self.logger.error(f"[FWD] server_deliver failed: {e!r}")
 
     async def _handle_server_announce(self, websocket: ServerConnection, data: ProtocolMessage):
         try:
@@ -265,16 +288,36 @@ class Server(BaseServer):
         except Exception as e:
             self.logger.error(f"[GOODBYE] failed: {e!r}")
 
-    # ---------- user side ----------
+    async def _handle_user_advertise(self, data: ProtocolMessage):
+        try:
+            payload = UserAdvertisePayload(**data.payload)
+            origin_sid = data.from_
+            self.user_locations[payload.user_id] = origin_sid
+            self.logger.info(f"[GOSSIP] user {payload.user_id} @ server {origin_sid}")
+            # advertise to local clients about this new user
+            await self._broadcast_local_user_advertise(payload.user_id, payload.pubkey)
+        except Exception as e:
+            self.logger.error(f"[GOSSIP] user_advertise failed: {e!r}")
+
+    async def _handle_user_remove(self, data: ProtocolMessage):
+        try:
+            payload = UserRemovePayload(**data.payload)
+            origin_sid = data.from_
+            if self.user_locations.get(payload.user_id) == origin_sid:
+                self.user_locations.pop(payload.user_id, None)
+                self.logger.info(f"[GOSSIP] user {payload.user_id} removed from server {origin_sid}")
+        except Exception as e:
+            self.logger.error(f"[GOSSIP] user_remove failed: {e!r}")
+
     async def _handle_user_connection(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         try:
             match req_type:
                 case MsgType.USER_HELLO:
-                    await self._user_hello(websocket, data)
+                    await self._handle_user_hello(websocket, data)
                 case MsgType.MSG_DIRECT:
-                    await self._msg_direct(data)
+                    await self._handle_msg_direct(data)
                 case MsgType.MSG_PUBLIC_CHANNEL:
-                    await self._msg_public(data)
+                    await self._handle_msg_public(data)
                 case MsgType.COMMAND:
                     await self._handle_command(websocket, data)
                 case _:
@@ -285,7 +328,7 @@ class Server(BaseServer):
         except Exception as e:
             self.logger.error(f"[USER] error: {e!r}")
 
-    async def _user_hello(self, websocket: ServerConnection, msg: ProtocolMessage):
+    async def _handle_user_hello(self, websocket: ServerConnection, msg: ProtocolMessage):
         payload = UserHelloPayload(**msg.payload)
         user_id = msg.from_
         if user_id in self.local_users:
@@ -316,19 +359,21 @@ class Server(BaseServer):
 
         # fan-out to all connected servers
         for sid, peer in self.peers.items():
+            self.logger.info(f"[GOSSIP] advertising user: '{user_id}' to server: '{sid}'")
             await peer.ws.send(req)
 
         # fan-out to the introducer
         if self.introducer_ws:
+            self.logger.info(f"[GOSSIP] advertising user: '{user_id}' to Introducer")
             await self.introducer_ws.send(req)
 
-    async def _send_roster_to_user(self, websocket: ServerConnection, exclude_user: str):
+    async def _send_roster_to_user(self, websocket: ServerConnection, new_user: str):
         """
         Send USER_ADVERTISE for all known LOCAL users to a single websocket.
         This ensures a newly joined user learns about earlier users' pubkeys.
         """
         for uid in list(self.local_users.keys()):
-            if uid == exclude_user:
+            if uid == new_user:
                 continue
 
             rec = self.db.get_user(uid)
@@ -336,12 +381,13 @@ class Server(BaseServer):
                 continue
 
             payload = UserAdvertisePayload(user_id=uid, server_id=self.server_id, pubkey=rec["pubkey"], meta={}).model_dump()
-            req = create_body(MsgType.USER_ADVERTISE, self.server_id, exclude_user, payload)
+            req = create_body(MsgType.USER_ADVERTISE, self.server_id, new_user, payload)
 
             try:
+                self.logger.info(f"[ROSTER] sending local user: '{uid}' to new user: '{new_user}'")
                 await websocket.send(req)
             except Exception as e:
-                self.logger.error(f"[ROSTER] failed sending local user {uid} to {exclude_user}: {e!r}")
+                self.logger.error(f"[ROSTER] failed sending local user {uid} to {new_user}: {e!r}")
 
             # TODO: send roster of remote users?
 
@@ -351,13 +397,14 @@ class Server(BaseServer):
         for uid, ws in list(self.local_users.items()):
             req = create_body(MsgType.USER_ADVERTISE, self.server_id, uid, payload)
             try:
+                self.logger.info(f"[LOCAL-ADV] sending new user: '{user_id}' to local user: '{uid}'")
                 await ws.send(req)
             except (ConnectionClosedError, ConnectionClosedOK):
                 pass
             except Exception as e:
                 self.logger.error(f"[LOCAL-ADV] failed to send to client: {e!r}")
 
-    async def _msg_direct(self, msg: ProtocolMessage):
+    async def _handle_msg_direct(self, msg: ProtocolMessage):
         payload = MsgDirectPayload(**msg.payload)
         target = msg.to
 
@@ -394,7 +441,7 @@ class Server(BaseServer):
 
         self.logger.warning(f"[ERROR-UP] {ErrorCode.USER_NOT_FOUND}: {target} not registered")
 
-    async def _msg_public(self, msg: ProtocolMessage):
+    async def _handle_msg_public(self, msg: ProtocolMessage):
         payload = MsgPublicChannelPayload(**msg.payload)
 
         # broadcast to local users
@@ -427,56 +474,9 @@ class Server(BaseServer):
             req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
             await p.ws.send(req)
 
-    async def _handle_user_advertise(self, data: ProtocolMessage):
-        try:
-            payload = UserAdvertisePayload(**data.payload)
-            origin_sid = data.from_
-            self.user_locations[payload.user_id] = origin_sid
-            if not self.db.get_user(payload.user_id):
-                self.db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
-            self.logger.info(f"[GOSSIP] user {payload.user_id} @ server {origin_sid}")
-        except Exception as e:
-            self.logger.error(f"[GOSSIP] user_advertise failed: {e!r}")
-
-    async def _handle_user_remove(self, data: ProtocolMessage):
-        try:
-            payload = UserRemovePayload(**data.payload)
-            origin_sid = data.from_
-            if self.user_locations.get(payload.user_id) == origin_sid:
-                self.user_locations.pop(payload.user_id, None)
-                self.logger.info(f"[GOSSIP] user {payload.user_id} removed from server {origin_sid}")
-        except Exception as e:
-            self.logger.error(f"[GOSSIP] user_remove failed: {e!r}")
-
-    async def _handle_server_deliver(self, data: ProtocolMessage):
-        try:
-            payload = ServerDeliverPayload(**data.payload)
-            key = f"{data.ts}_{data.from_}_{data.to}_{hash(json.dumps(data.payload, sort_keys=True))}"
-            if key in self.seen_ids:
-                return
-            self.seen_ids.add(key)
-
-            if payload.user_id in self.local_users:
-                deliver_pl = UserDeliverPayload(
-                    ciphertext=payload.ciphertext,
-                    sender=payload.sender,
-                    sender_pub=payload.sender_pub,
-                    content_sig=payload.content_sig
-                ).model_dump()
-                sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
-                req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig)
-                try:
-                    await self.local_users[payload.user_id].send(req)
-                except Exception as e:
-                    self.logger.error(f"[FWD] deliver to {payload.user_id} failed: {e!r}")
-        except Exception as e:
-            self.logger.error(f"[FWD] server_deliver failed: {e!r}")
-
-    # ---------- commands ----------
     async def _handle_command(self, websocket: ServerConnection, data: ProtocolMessage):
         payload = CommandPayload(**data.payload)
         cmd = payload.command.strip().lower()
-        # TODO: improve command handling
         if cmd == "/list":
             users = sorted(
                 list(self.local_users.keys())
