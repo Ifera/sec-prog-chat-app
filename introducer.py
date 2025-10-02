@@ -107,6 +107,7 @@ class Introducer(BaseServer):
         except Exception as e:
             self.logger.error(f"[USER REMOVE] failed: {e!r}")
 
+
 if __name__ == "__main__":
     srv = Introducer()
     try:

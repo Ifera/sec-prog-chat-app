@@ -158,7 +158,7 @@ class Client:
             self.known_pubkeys.pop(pl.user_id, None)
             logger.info("User offline: %s", pl.user_id)
         except Exception as e:
-          logger.error(f"Bad USER_REMOVE payload: {e!r}")
+            logger.error(f"Bad USER_REMOVE payload: {e!r}")
 
     async def send_command(self, line: str):
         if not self.websocket:

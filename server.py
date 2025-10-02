@@ -187,7 +187,6 @@ class Server(BaseServer):
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         await self._handle(websocket, req_type, data)
 
-    # Called by BaseServer when a non-peer websocket closes
     async def on_client_disconnect(self, websocket: ServerConnection):
         user_id = self.ws_to_user.get(websocket)
         if user_id:
