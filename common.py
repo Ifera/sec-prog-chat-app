@@ -17,6 +17,7 @@ class Peer:
     pubkey: Optional[str] = None
     last_seen: float = field(default_factory=lambda: time.time())
     missed: int = 0
+    outbound: bool = False
 
 
 def create_body(typ: MsgType, frm: str, to: str, payload: dict, sig: str = "") -> str:

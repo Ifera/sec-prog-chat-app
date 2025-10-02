@@ -148,7 +148,7 @@ class Server(BaseServer):
         try:
             # connect to the remote server
             ws: ClientConnection = await connect(uri, logger=self.logger)
-            peer = Peer(sid=sid, ws=ws, host=host, port=port, pubkey=pubkey)
+            peer = Peer(sid=sid, ws=ws, host=host, port=port, pubkey=pubkey, outbound=True)
             self.peers[sid] = peer
             self.server_addrs[sid] = (host, port)
 
@@ -215,7 +215,7 @@ class Server(BaseServer):
                 peer.missed = 0
             else:
                 self.peers[sid] = Peer(sid=sid, ws=websocket, host=pl.host, port=pl.port, pubkey=pl.pubkey)
-                self._bg_tasks.add(asyncio.create_task(self._listen_server(self.peers[sid]), name=f"listen-{sid}"))
+                # self._bg_tasks.add(asyncio.create_task(self._listen_server(self.peers[sid]), name=f"listen-{sid}"))
 
             self.server_addrs[sid] = (pl.host, pl.port)
         except Exception as e:
@@ -364,7 +364,7 @@ class Server(BaseServer):
         target = msg.to
 
         # deliver locally if present
-        if target in self.local_users.items():
+        if target in self.local_users:
             deliver_pl = UserDeliverPayload(
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
