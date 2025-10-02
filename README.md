@@ -114,6 +114,92 @@ Client commands:
 
 ---
 
+## Quick start (Linux/macOS)
+
+Prerequisites:
+- Python 3.12+ (tested with 3.12)
+- Bash-compatible shell
+
+Create a virtual environment and install dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+Mark helper scripts executable (first time only):
+
+```bash
+chmod +x start_introducer.sh start_server.sh start_client.sh
+```
+
+### 1) Start an Introducer
+
+Use the helper script (reads `.introducer.env` if present):
+
+```bash
+./start_introducer.sh
+```
+
+Or with explicit args (defaults: HOST=127.0.0.1, PORT=8000):
+
+```bash
+./start_introducer.sh 8000 introducers.json
+```
+
+Or run directly with environment variables:
+
+```bash
+HOST=127.0.0.1 PORT=8000 INTRODUCERS_JSON=introducers.json python3 introducer.py
+```
+
+### 2) Start one or more Servers
+
+Use the helper script (reads `.server.env` if present):
+
+```bash
+./start_server.sh
+```
+
+With explicit args: <PORT> <HOST> <INTRODUCERS_JSON>
+
+```bash
+./start_server.sh 8080 127.0.0.1 introducers.json
+```
+
+Or run directly with environment variables (server defaults in code are HOST=0.0.0.0, PORT=8082 if you don’t override):
+
+```bash
+HOST=127.0.0.1 PORT=8080 INTRODUCERS_JSON=introducers.json python3 server.py
+```
+
+Start multiple servers by using different PORT values; they will all try to connect to the introducer(s) listed in `introducers.json` and then to each other.
+
+### 3) Start a Client
+
+Connect a client to a server (user_id optional; if omitted, a random UUID is generated):
+
+```bash
+./start_client.sh
+```
+
+With explicit args: <USER_ID> <SERVER_HOST> <SERVER_PORT>
+
+```bash
+./start_client.sh alice 127.0.0.1 8080
+```
+
+Or run directly:
+
+```bash
+python3 client.py alice 127.0.0.1 8080
+```
+
+Client commands are the same as Windows.
+
+---
+
 ## How it works (Architecture)
 
 - Introducer (introducer.py)
