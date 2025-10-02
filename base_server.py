@@ -4,7 +4,6 @@ import logging
 import time
 from typing import Dict, Optional
 
-from websockets.asyncio.client import connect
 from websockets.asyncio.server import serve, ServerConnection
 from websockets.exceptions import (
     ConnectionClosedError,
@@ -16,7 +15,7 @@ from config import config
 from crypto import generate_rsa_keypair
 from models import (
     MsgType, HeartbeatPayload,
-    current_timestamp, generate_uuid, ServerType
+    current_timestamp, generate_uuid, ServerType, ProtocolMessage
 )
 
 logging.basicConfig(level=config.logging_level, format=config.logging_format)
@@ -67,7 +66,8 @@ class BaseServer:
                 config.host,
                 config.port,
                 ping_interval=self.ping_interval,
-                ping_timeout=self.ping_timeout
+                ping_timeout=self.ping_timeout,
+                logger=self.logger,
         ):
             self.logger.info(f"[LISTEN] ws://{config.host}:{config.port}/ws")
             try:
@@ -112,22 +112,22 @@ class BaseServer:
         pass
 
     # ---------- HEALTH / HEARTBEAT ----------
-    async def _probe_peer(self, sid: str, host: str, port: int) -> bool:
-        uri = f"ws://{host}:{port}/ws"
+    async def _probe_peer(self, sid: str, peer: Peer) -> bool:
         try:
-            async with connect(uri) as conn:  # auto-closes
-                hb = {
-                    "type": MsgType.HEARTBEAT,
-                    "from": self.server_id,
-                    "to": sid,
-                    "ts": current_timestamp(),
-                    "payload": HeartbeatPayload(server_type=self.server_type).model_dump(),
-                    "sig": "",
-                }
-                await asyncio.wait_for(conn.send(json.dumps(hb)), timeout=3)
-                return True
-        except Exception:
-            self.logger.error(f"[PROBE] failed to {sid} @ {host}:{port}")
+            hb = {
+                "type": MsgType.HEARTBEAT,
+                "from": self.server_id,
+                "to": sid,
+                "ts": current_timestamp(),
+                "payload": HeartbeatPayload(server_type=self.server_type).model_dump(),
+                "sig": "",
+            }
+            enc_hb = json.dumps(hb)
+            await peer.ws.send(enc_hb)
+            return True
+        except Exception as e:
+            self.logger.error(f"[PROBE] failed to {sid} @ {peer.host}:{peer.port}")
+            self.logger.exception(e)
             return False
 
     async def _health_monitor(self):
@@ -149,7 +149,7 @@ class BaseServer:
                 self.logger.info(f"[HEALTH] Sending heartbeat to {sid} @ {host}:{port}")
 
                 try:
-                    probe_ok = await self._probe_peer(sid, host, port)
+                    probe_ok = await self._probe_peer(sid, peer)
                     now = time.time()
 
                     if probe_ok:
@@ -194,18 +194,36 @@ class BaseServer:
 
     # ---------- incoming handling ----------
     async def _incoming(self, websocket: ServerConnection):
+        sid: Optional[str] = None
         try:
-            first_raw = await websocket.recv()
-            data = json.loads(first_raw)
-            req_type = data.get("type")
-            self.logger.info(f"[INCOMING] Request Type: {req_type}")
-            await self.handle_incoming(websocket, req_type, data)
+            async for raw in websocket:
+                try:
+                    raw_json = json.loads(raw)
+                except json.JSONDecodeError:
+                    self.logger.error("[INCOMING] Invalid JSON frame")
+                    continue
+
+                try:
+                    data = ProtocolMessage(**raw_json)
+                except Exception as e:
+                    self.logger.error(f"[INCOMING] Bad payload shape: {e!r}")
+                    continue
+
+                await self.handle_incoming(websocket, data.type, data)
+
+                if not sid:
+                    for psid, p in self.peers.items():
+                        if p.ws is websocket:
+                            sid = psid
+                            break
+
         except (ConnectionClosedError, ConnectionClosedOK):
             pass
-        except json.JSONDecodeError:
-            self.logger.error("[INCOMING] Invalid JSON on first frame")
-        except Exception:
-            self.logger.error("[INCOMING] Error in first frame handling")
+        except Exception as e:
+            self.logger.error(f"[INCOMING] Unhandled error in connection loop: {e!r}")
+        finally:
+            if sid:
+                await self._on_peer_closed(sid)
 
-    async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: dict):
+    async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         pass

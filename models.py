@@ -67,9 +67,17 @@ class ServerInfo(BaseModel):
     pubkey: str
 
 
+class ClientInfo(BaseModel):
+    user_id: str
+    host: str
+    port: int
+    pubkey: str
+
+
 class ServerWelcomePayload(BaseModel):
     assigned_id: str
-    servers: List[ServerInfo]  # introducer returns servers
+    servers: List[ServerInfo]
+    clients: List[ClientInfo]
 
 
 class ServerAnnouncePayload(BaseModel):

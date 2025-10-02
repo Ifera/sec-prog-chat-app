@@ -9,7 +9,7 @@ class Config:
         # Core server settings
         self.host: str = os.getenv("HOST", "0.0.0.0")
         self.port: int = int(os.getenv("PORT", "8082"))
-        self.logging_level = logging.INFO
+        self.logging_level = logging.DEBUG
         self.logging_format = "[%(asctime)s] [%(levelname)s] [%(name)s] %(message)s"
 
         # DB

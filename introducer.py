@@ -10,7 +10,7 @@ from common import Peer
 from crypto import load_private_key, compute_transport_sig
 from models import (
     MsgType, ServerHelloJoinPayload, ServerWelcomePayload, ServerInfo,
-    current_timestamp, generate_uuid, ServerType
+    current_timestamp, generate_uuid, ServerType, ClientInfo, UserAdvertisePayload, ProtocolMessage
 )
 
 
@@ -26,6 +26,7 @@ class Introducer(BaseServer):
 
         # introducer directory
         self.known_servers: Dict[str, Dict[str, str | int]] = {}  # sid -> {host, port, pubkey}
+        self.known_users: Dict[str, Dict[str, str | int]] = {}  # uid -> {host, port, pubkey}
 
     async def on_start(self):
         self.logger.info("[BOOTSTRAP] Acting as introducer; awaiting joins.")
@@ -36,18 +37,25 @@ class Introducer(BaseServer):
             self.known_servers.pop(sid, None)
 
     # ---------- incoming handling ----------
-    async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: dict):
-        if req_type == MsgType.SERVER_HELLO_JOIN:
-            await self._handle_server_join(websocket, data)
-        else:
-            self.logger.error(f"[INCOMING] unknown request type: {req_type}")
-            await websocket.close()
+    async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
+        match req_type:
+            case MsgType.SERVER_HELLO_JOIN:
+                await self._handle_server_join(websocket, data)
+            case MsgType.HEARTBEAT:
+                pass
+            # case MsgType.USER_ADVERTISE:
+            #     await self._handle_user_advertise(websocket, data)
+            # case MsgType.USER_REMOVE:
+            #     await self._handle_user_remove(websocket, data)
+            case _:
+                self.logger.error(f"[INCOMING] unknown request type: {req_type}")
+                await websocket.close()
 
-    async def _handle_server_join(self, websocket: ServerConnection, data: dict):
+    async def _handle_server_join(self, websocket: ServerConnection, data: ProtocolMessage):
         try:
             # SERVER sends SERVER_HELLO_JOIN to INTRODUCER
-            payload = ServerHelloJoinPayload(**data["payload"])
-            requested_id = data.get("from") or generate_uuid()
+            payload = ServerHelloJoinPayload(**data.payload)
+            requested_id = data.from_ or generate_uuid()
             assigned_id = requested_id if requested_id not in self.known_servers else generate_uuid()
             self.known_servers[assigned_id] = {"host": payload.host, "port": payload.port, "pubkey": payload.pubkey}
 
@@ -59,12 +67,21 @@ class Introducer(BaseServer):
                     ServerInfo(server_id=sid, host=s["host"], port=int(s["port"]), pubkey=s["pubkey"]).model_dump()
                 )
 
-            # INTRODUCER responds with SERVER_WELCOME (including assigned_id and current servers)
-            welcome = ServerWelcomePayload(assigned_id=assigned_id, servers=servers_payload).model_dump()
+            clients_payload = []
+            for uid, u in self.known_users.items():
+                if not u:
+                    continue
+                clients_payload.append(
+                    ClientInfo(user_id=uid, host=u["host"], port=int(u["port"]), pubkey=u["pubkey"]).model_dump()
+                )
+
+            # INTRODUCER responds with SERVER_WELCOME
+            welcome = ServerWelcomePayload(assigned_id=assigned_id, servers=servers_payload,
+                                           clients=clients_payload).model_dump()
             msg = {
                 "type": MsgType.SERVER_WELCOME,
                 "from": self.server_id,
-                "to": data.get("from"),
+                "to": data.from_,
                 "ts": current_timestamp(),
                 "payload": welcome,
                 "sig": compute_transport_sig(load_private_key(self.server_private_key), welcome),
@@ -76,8 +93,17 @@ class Introducer(BaseServer):
 
             # register peer socket under the joining server's (claimed) id
             self.peers[assigned_id] = Peer(sid=assigned_id, ws=websocket, host=payload.host, port=payload.port)
-        except Exception:
-            self.logger.error("[JOIN] failed to handle server join")
+        except Exception as e:
+            self.logger.error(f"[JOIN] failed to handle server join: {e!r}")
+
+    async def _handle_user_advertise(self, websocket: ServerConnection, data: dict):
+        try:
+            payload = UserAdvertisePayload(**data["payload"])
+            # server =
+            self.known_users[payload.user_id] = {"host": payload.host, "port": payload.port, "pubkey": payload.pubkey}
+            self.logger.info(f"[USER ADVERTISE] User {payload.user_id} @ {payload.host}:{payload.port}")
+        except Exception as e:
+            self.logger.error(f"[USER ADVERTISE] failed to handle user advertise: {e!r}")
 
 
 if __name__ == "__main__":
