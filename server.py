@@ -255,7 +255,7 @@ class Server(BaseServer):
                     content_sig=payload.content_sig
                 ).model_dump()
                 sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
-                req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig)
+                req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig, ts=data.ts)
                 try:
                     await self.local_users[payload.user_id].send(req)
                 except Exception as e:
@@ -295,9 +295,8 @@ class Server(BaseServer):
             payload = UserAdvertisePayload(**data.payload)
             origin_sid = data.from_
             self.user_locations[payload.user_id] = origin_sid
-            # save remote user to db if not present already
-            if not self.db.get_user(payload.user_id):
-                self.db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
+            # save or update remote user to db
+            self.db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
             self.logger.info(f"[GOSSIP] user {payload.user_id} @ server {origin_sid}")
             # advertise to local clients about this new user
             await self._broadcast_local_user_advertise(payload.user_id, payload.pubkey)
@@ -455,7 +454,7 @@ class Server(BaseServer):
                 content_sig=payload.content_sig
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
-            req = create_body(MsgType.USER_DELIVER, self.server_id, target, deliver_pl, sig)
+            req = create_body(MsgType.USER_DELIVER, self.server_id, target, deliver_pl, sig, ts=msg.ts)
             try:
                 await self.local_users[target].send(req)
             except Exception as e:
@@ -473,7 +472,7 @@ class Server(BaseServer):
                 content_sig=payload.content_sig
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
-            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
+            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig, ts=msg.ts)
             await self.peers[sid].ws.send(req)
             return
 
@@ -491,7 +490,7 @@ class Server(BaseServer):
                 content_sig=payload.content_sig
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
-            req = create_body(MsgType.USER_DELIVER, self.server_id, uid, deliver_pl, sig)
+            req = create_body(MsgType.USER_DELIVER, self.server_id, uid, deliver_pl, sig, ts=msg.ts)
             try:
                 await ws.send(req)
             except (ConnectionClosedError, ConnectionClosedOK):
@@ -509,7 +508,7 @@ class Server(BaseServer):
                 content_sig=payload.content_sig
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
-            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
+            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig, ts=msg.ts)
             await p.ws.send(req)
 
     async def _handle_command(self, websocket: ServerConnection, data: ProtocolMessage):

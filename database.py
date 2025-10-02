@@ -12,6 +12,10 @@ class Database:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
+            cursor.execute("DROP TABLE IF EXISTS users")
+            cursor.execute("DROP TABLE IF EXISTS groups")
+            cursor.execute("DROP TABLE IF EXISTS group_members")
+
             # Users
             cursor.execute('''
                            CREATE TABLE IF NOT EXISTS users

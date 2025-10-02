@@ -20,12 +20,12 @@ class Peer:
     outbound: bool = False
 
 
-def create_body(typ: MsgType, frm: str, to: str, payload: dict, sig: str = "") -> str:
+def create_body(typ: MsgType, frm: str, to: str, payload: dict, sig: str = "", ts: int | None = None) -> str:
     req = {
         "type": typ.value,
         "from": frm,
         "to": to,
-        "ts": current_timestamp(),
+        "ts": ts if ts is not None else current_timestamp(),
         "payload": payload,
         "sig": sig
     }

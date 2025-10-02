@@ -181,7 +181,7 @@ class Client:
             ts = current_timestamp()
             content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, target, ts)
             dm_pl = MsgDirectPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
-            body = create_body(MsgType.MSG_DIRECT, self.user_id, target, dm_pl)
+            body = create_body(MsgType.MSG_DIRECT, self.user_id, target, dm_pl, ts=ts)
             await self.websocket.send(body)
             return
 
@@ -192,7 +192,7 @@ class Client:
             ts = current_timestamp()
             content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, ts)
             pub_pl = MsgPublicChannelPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
-            body = create_body(MsgType.MSG_PUBLIC_CHANNEL, self.user_id, "public", pub_pl)
+            body = create_body(MsgType.MSG_PUBLIC_CHANNEL, self.user_id, "public", pub_pl, ts=ts)
             await self.websocket.send(body)
             return
 
