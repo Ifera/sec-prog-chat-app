@@ -187,46 +187,7 @@ class Server(BaseServer):
 
     # ---------- incoming handling ----------
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
-        if req_type != MsgType.HEARTBEAT:
-            self.logger.info(f"[INCOMING] Request: {data}")
-
-        match req_type:
-            case MsgType.SERVER_ANNOUNCE:
-                await self._handle_server_announce(websocket, data)
-            case MsgType.SERVER_GOODBYE:
-                await self._handle_server_goodbye(data)
-                await websocket.close()
-            case _:
-                # assume user message
-                await self._handle_user_connection(websocket, req_type, data)
-
-    async def _handle_server_announce(self, websocket: ServerConnection, data: ProtocolMessage):
-        try:
-            pl = ServerAnnouncePayload(**data.payload)
-            sid = data.from_
-
-            if sid in self.peers:
-                peer = self.peers[sid]
-                peer.ws = websocket
-                peer.host = pl.host
-                peer.port = pl.port
-                peer.pubkey = pl.pubkey
-                peer.last_seen = time.time()
-                peer.missed = 0
-            else:
-                self.peers[sid] = Peer(sid=sid, ws=websocket, host=pl.host, port=pl.port, pubkey=pl.pubkey)
-                # self._bg_tasks.add(asyncio.create_task(self._listen_server(self.peers[sid]), name=f"listen-{sid}"))
-
-            self.server_addrs[sid] = (pl.host, pl.port)
-        except Exception as e:
-            self.logger.error(f"[ANNOUNCE] failed: {e!r}")
-
-    async def _handle_server_goodbye(self, data: ProtocolMessage):
-        try:
-            sid = data.from_
-            await self._on_peer_closed(sid)
-        except Exception as e:
-            self.logger.error(f"[GOODBYE] failed: {e!r}")
+        await self._handle(websocket, req_type, data)
 
     async def _listen_server(self, peer: Peer):
         sid = peer.sid
@@ -245,18 +206,7 @@ class Server(BaseServer):
 
                 try:
                     data = ProtocolMessage(**raw_json)
-                    req_type = data.type
-                    match req_type:
-                        case MsgType.USER_ADVERTISE:
-                            await self._handle_user_advertise(data)
-                        case MsgType.USER_REMOVE:
-                            await self._handle_user_remove(data)
-                        case MsgType.SERVER_DELIVER:
-                            await self._handle_server_deliver(data)
-                        case MsgType.SERVER_GOODBYE:
-                            await self._handle_server_goodbye(data)
-                        case _:
-                            self.logger.debug(f"[LISTEN {sid}] unknown type: {req_type}")
+                    await self._handle(pr.ws, data.type, data)
                 except Exception as e:
                     self.logger.error(f"[LISTEN {sid}] handler error: {e!r}")
         except (ConnectionClosedError, ConnectionClosedOK) as e:
@@ -266,6 +216,54 @@ class Server(BaseServer):
             self.logger.warning(f"[LISTEN {sid}] websocket error: {e!r}")
         except Exception as e:
             self.logger.error(f"[LISTEN {sid}] unexpected failure: {e!r}")
+
+    async def _handle(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
+        if req_type != MsgType.HEARTBEAT:
+            self.logger.info(f"[INCOMING] Request: {data}")
+
+        match req_type:
+            case MsgType.USER_ADVERTISE:
+                await self._handle_user_advertise(data)
+            case MsgType.USER_REMOVE:
+                await self._handle_user_remove(data)
+            case MsgType.SERVER_DELIVER:
+                await self._handle_server_deliver(data)
+            case MsgType.SERVER_GOODBYE:
+                await self._handle_server_goodbye(data)
+            case MsgType.SERVER_ANNOUNCE:
+                await self._handle_server_announce(websocket, data)
+            case MsgType.SERVER_GOODBYE:
+                await self._handle_server_goodbye(data)
+                await websocket.close()
+            case _:  # assume user message
+                await self._handle_user_connection(websocket, req_type, data)
+
+    async def _handle_server_announce(self, websocket: ServerConnection, data: ProtocolMessage):
+        try:
+            pl = ServerAnnouncePayload(**data.payload)
+            sid = data.from_
+
+            if sid in self.peers:
+                peer = self.peers[sid]
+                peer.ws = websocket
+                peer.host = pl.host
+                peer.port = pl.port
+                peer.pubkey = pl.pubkey
+                peer.last_seen = time.time()
+                peer.missed = 0
+            else:
+                self.peers[sid] = Peer(sid=sid, ws=websocket, host=pl.host, port=pl.port, pubkey=pl.pubkey)
+
+            self.server_addrs[sid] = (pl.host, pl.port)
+        except Exception as e:
+            self.logger.error(f"[ANNOUNCE] failed: {e!r}")
+
+    async def _handle_server_goodbye(self, data: ProtocolMessage):
+        try:
+            sid = data.from_
+            await self._on_peer_closed(sid)
+        except Exception as e:
+            self.logger.error(f"[GOODBYE] failed: {e!r}")
 
     # ---------- user side ----------
     async def _handle_user_connection(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
@@ -280,7 +278,7 @@ class Server(BaseServer):
                 case MsgType.COMMAND:
                     await self._handle_command(websocket, data)
                 case _:
-                    self.logger.debug(f"[USER] unknown type: {req_type}")
+                    self.logger.error(f"[USER] Unknown request type: {req_type}")
         except (ConnectionClosedOK, ConnectionClosedError):
             # TODO: maybe remove user on disconnect?
             pass
