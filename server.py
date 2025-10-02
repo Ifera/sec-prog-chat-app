@@ -45,7 +45,7 @@ class Server(BaseServer):
 
         # local presence + routing (user clients)
         self.local_users: Dict[str, ServerConnection] = {}  # user_id -> ws
-        self.user_locations: Dict[str, str] = {}  # user_id -> "local" | f"server_{sid}"
+        self.user_locations: Dict[str, str] = {}  # user_id -> "local" | f"server_id"
 
         # duplicate suppression for forwarded deliveries
         self.seen_ids: set[str] = set()
@@ -124,7 +124,7 @@ class Server(BaseServer):
                             self.logger.info("[BOOTSTRAP] No remote clients found...")
 
                         for ci in welcome.clients:
-                            self.user_locations[ci.user_id] = f"server_{ci.server_id}"
+                            self.user_locations[ci.user_id] = ci.server_id
 
                         self.logger.info("[BOOTSTRAP] Bootstrap complete")
 
@@ -378,21 +378,19 @@ class Server(BaseServer):
             return
 
         # else route to remote server if we know it
-        loc = self.user_locations.get(target)
-        if loc and loc.startswith("server_"):
-            sid = loc.replace("server_", "")
-            if sid in self.peers:
-                fwd_pl = ServerDeliverPayload(
-                    user_id=target,
-                    ciphertext=payload.ciphertext,
-                    sender=msg.from_,
-                    sender_pub=payload.sender_pub,
-                    content_sig=payload.content_sig
-                ).model_dump()
-                sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
-                req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
-                await self.peers[sid].ws.send(req)
-                return
+        sid = self.user_locations.get(target)
+        if sid and sid != "local" and sid in self.peers:
+            fwd_pl = ServerDeliverPayload(
+                user_id=target,
+                ciphertext=payload.ciphertext,
+                sender=msg.from_,
+                sender_pub=payload.sender_pub,
+                content_sig=payload.content_sig
+            ).model_dump()
+            sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
+            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
+            await self.peers[sid].ws.send(req)
+            return
 
         self.logger.warning(f"[ERROR-UP] {ErrorCode.USER_NOT_FOUND}: {target} not registered")
 
@@ -433,7 +431,7 @@ class Server(BaseServer):
         try:
             payload = UserAdvertisePayload(**data.payload)
             origin_sid = data.from_
-            self.user_locations[payload.user_id] = f"server_{origin_sid}"
+            self.user_locations[payload.user_id] = origin_sid
             if not self.db.get_user(payload.user_id):
                 self.db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
             self.logger.info(f"[GOSSIP] user {payload.user_id} @ server {origin_sid}")
@@ -444,7 +442,7 @@ class Server(BaseServer):
         try:
             payload = UserRemovePayload(**data.payload)
             origin_sid = data.from_
-            if self.user_locations.get(payload.user_id) == f"server_{origin_sid}":
+            if self.user_locations.get(payload.user_id) == origin_sid:
                 self.user_locations.pop(payload.user_id, None)
                 self.logger.info(f"[GOSSIP] user {payload.user_id} removed from server {origin_sid}")
         except Exception as e:
