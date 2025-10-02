@@ -46,6 +46,7 @@ class Server(BaseServer):
         # local presence + routing (user clients)
         self.local_users: Dict[str, ServerConnection] = {}  # user_id -> ws
         self.user_locations: Dict[str, str] = {}  # user_id -> "local" | f"server_id"
+        self.ws_to_user: Dict[ServerConnection, str] = {}
 
         # duplicate suppression for forwarded deliveries
         self.seen_ids: set[str] = set()
@@ -186,6 +187,12 @@ class Server(BaseServer):
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         await self._handle(websocket, req_type, data)
 
+    # Called by BaseServer when a non-peer websocket closes
+    async def on_client_disconnect(self, websocket: ServerConnection):
+        user_id = self.ws_to_user.get(websocket)
+        if user_id:
+            await self._cleanup_local_user(user_id, reason="socket-closed", is_remote_call=False)
+
     async def _listen_server(self, peer: Peer):
         sid = peer.sid
         try:
@@ -230,7 +237,6 @@ class Server(BaseServer):
                 await self._handle_user_advertise(data)
             case MsgType.USER_REMOVE:
                 await self._handle_user_remove(data)
-                await websocket.close()
             case _:  # assume user message
                 await self._handle_user_connection(websocket, req_type, data)
 
@@ -303,11 +309,12 @@ class Server(BaseServer):
         try:
             payload = UserRemovePayload(**data.payload)
             origin_sid = data.from_
-            if self.user_locations.get(payload.user_id) == origin_sid:
-                self.user_locations.pop(payload.user_id, None)
-                self.logger.info(f"[GOSSIP] user {payload.user_id} removed from server {origin_sid}")
+            user_id = payload.user_id
+            if self.user_locations.get(user_id) == origin_sid:
+                await self._cleanup_local_user(user_id, reason=f"gossip-removed-by-{origin_sid}", is_remote_call=True)
+                self.logger.info(f"[GOSSIP] user {payload.user_id} removed")
         except Exception as e:
-            self.logger.error(f"[GOSSIP] user_remove failed: {e!r}")
+            self.logger.error(f"[GOSSIP] _handle_user_remove failed: {e!r}")
 
     async def _handle_user_connection(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         try:
@@ -323,7 +330,6 @@ class Server(BaseServer):
                 case _:
                     self.logger.error(f"[USER] Unknown request type: {req_type}")
         except (ConnectionClosedOK, ConnectionClosedError):
-            # TODO: maybe remove user on disconnect?
             pass
         except Exception as e:
             self.logger.error(f"[USER] error: {e!r}")
@@ -337,6 +343,7 @@ class Server(BaseServer):
 
         self.local_users[user_id] = websocket
         self.user_locations[user_id] = "local"
+        self.ws_to_user[websocket] = user_id
         self.db.add_user(user_id, payload.pubkey, "", "", {})
 
         # when a new user connects, we first advertise their identity to all other servers/peers and the introducer
@@ -420,6 +427,21 @@ class Server(BaseServer):
                 pass
             except Exception as e:
                 self.logger.error(f"[LOCAL-ADV] failed to send to client: {e!r}")
+
+    async def _broadcast_local_user_remove(self, user_id: str):
+        """
+        Tell all LOCAL clients that 'user_id' went offline, so they can forget its pubkey.
+        """
+        payload = UserRemovePayload(user_id=user_id, server_id=self.server_id).model_dump()
+        for uid, ws in list(self.local_users.items()):
+            req = create_body(MsgType.USER_REMOVE, self.server_id, uid, payload)
+            try:
+                self.logger.info(f"[LOCAL-RM] telling local user '{uid}' to forget '{user_id}'")
+                await ws.send(req)
+            except (ConnectionClosedError, ConnectionClosedOK):
+                pass
+            except Exception as e:
+                self.logger.error(f"[LOCAL-RM] failed to send USER_REMOVE to {uid}: {e!r}")
 
     async def _handle_msg_direct(self, msg: ProtocolMessage):
         payload = MsgDirectPayload(**msg.payload)
@@ -508,6 +530,52 @@ class Server(BaseServer):
                 await websocket.send(body)
             except Exception as e:
                 self.logger.error(f"[CMD] /list response failed: {e!r}")
+
+    async def _gossip_user_remove(self, user_id: str):
+        """Tell all remotes + introducer that a user is gone."""
+        pl = UserRemovePayload(user_id=user_id, server_id=self.server_id).model_dump()
+        req = create_body(MsgType.USER_REMOVE, self.server_id, "*", pl)
+
+        # send to peers
+        for sid, peer in list(self.peers.items()):
+            try:
+                await peer.ws.send(req)
+                self.logger.info(f"[GOSSIP] USER_REMOVE '{user_id}' -> server '{sid}'")
+            except Exception as e:
+                self.logger.warning(f"[GOSSIP] USER_REMOVE to {sid} failed: {e!r}")
+
+        # send to introducer
+        if self.introducer_ws:
+            try:
+                await self.introducer_ws.send(req)
+                self.logger.info(f"[GOSSIP] USER_REMOVE '{user_id}' -> Introducer")
+            except Exception as e:
+                self.logger.warning(f"[GOSSIP] USER_REMOVE to Introducer failed: {e!r}")
+
+    async def _cleanup_local_user(self, user_id: str, reason: str = "disconnect", is_remote_call: bool = False):
+        """Idempotent local cleanup: routing maps, DB, and gossip."""
+        # remove routing/locals
+        ws = self.local_users.pop(user_id, None)
+        self.user_locations.pop(user_id, None)
+
+        # drop reverse index
+        if ws:
+            self.ws_to_user.pop(ws, None)
+
+        # delete from DB
+        try:
+            self.db.delete_user(user_id)  # you'll add this in database.py below
+        except Exception as e:
+            self.logger.warning(f"[CLEANUP] DB delete for {user_id} failed: {e!r}")
+
+        # remove user from local clients
+        await self._broadcast_local_user_remove(user_id)
+
+        # gossip to others only if not a remote call (i.e. a user disconnect)
+        if not is_remote_call:
+            await self._gossip_user_remove(user_id)
+
+        self.logger.info(f"[CLEANUP] user {user_id} removed ({reason})")
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):

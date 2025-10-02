@@ -16,7 +16,7 @@ from crypto import (
     rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig
 )
 from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
-    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload
+    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload
 
 logging.basicConfig(level=config.logging_level, format=config.logging_format)
 logger = logging.getLogger("Client")
@@ -95,6 +95,8 @@ class Client:
                 await self._handle_command_response(msg)
             case MsgType.USER_ADVERTISE:
                 await self._handle_user_advertise(msg)
+            case MsgType.USER_REMOVE:
+                await self._handle_user_remove(msg)
             case MsgType.ERROR:
                 logger.error("ERROR: %s", msg.payload)
             case _:
@@ -149,6 +151,14 @@ class Client:
         if uid and pub:
             self.known_pubkeys[uid] = pub
             logger.info("user online: %s", uid)
+
+    async def _handle_user_remove(self, data: ProtocolMessage):
+        try:
+            pl = UserRemovePayload(**data.payload)
+            self.known_pubkeys.pop(pl.user_id, None)
+            logger.info("User offline: %s", pl.user_id)
+        except Exception as e:
+          logger.error(f"Bad USER_REMOVE payload: {e!r}")
 
     async def send_command(self, line: str):
         if not self.websocket:

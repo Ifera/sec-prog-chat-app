@@ -171,12 +171,16 @@ class BaseServer:
                 await peer.ws.close()
                 reason = "timeout" if timed_out else "disconnect"
                 self.logger.info(f"Closed peer: {sid} due to {reason}")
-            except Exception:
-                self.logger.error(f"[CLOSE] Peer close {sid} failed")
+            except Exception as e:
+                self.logger.error(f"[CLOSE] Peer close {sid} failed: {e!r}")
 
         await self.on_peer_closed(sid)
 
     async def on_peer_closed(self, sid: str):
+        pass
+
+    # ---------- client disconnect ----------
+    async def on_client_disconnect(self, websocket: ServerConnection):
         pass
 
     # ---------- incoming handling ----------
@@ -211,6 +215,11 @@ class BaseServer:
         finally:
             if sid:
                 await self._on_peer_closed(sid)
+            else:
+                try:
+                    await self.on_client_disconnect(websocket)
+                except Exception as e:
+                    self.logger.error(f"[INCOMING] on_client_disconnect failed: {e!r}")
 
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         pass

@@ -126,3 +126,10 @@ class Database:
             cursor = conn.cursor()
             cursor.execute("UPDATE groups SET version = ? WHERE group_id = ?", (version, group_id))
             conn.commit()
+
+    def delete_user(self, user_id: str) -> None:
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            cur.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
+            cur.execute("DELETE FROM group_members WHERE member_id = ?", (user_id,))
+            conn.commit()

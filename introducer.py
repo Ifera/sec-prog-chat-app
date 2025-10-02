@@ -9,7 +9,7 @@ from common import Peer, create_body
 from crypto import load_private_key, compute_transport_sig
 from models import (
     MsgType, ServerHelloJoinPayload, ServerWelcomePayload, ServerInfo,
-    generate_uuid, ServerType, ClientInfo, UserAdvertisePayload, ProtocolMessage
+    generate_uuid, ServerType, ClientInfo, UserAdvertisePayload, ProtocolMessage, UserRemovePayload
 )
 
 
@@ -44,8 +44,8 @@ class Introducer(BaseServer):
                 pass
             case MsgType.USER_ADVERTISE:
                 await self._handle_user_advertise(websocket, data)
-            # case MsgType.USER_REMOVE:
-            #     await self._handle_user_remove(websocket, data) TODO
+            case MsgType.USER_REMOVE:
+                await self._handle_user_remove(websocket, data)
             case _:
                 self.logger.error(f"[INCOMING] unknown request type: {req_type}")
                 await websocket.close()
@@ -98,6 +98,14 @@ class Introducer(BaseServer):
         except Exception as e:
             self.logger.error(f"[USER ADVERTISE] failed to handle user advertise: {e!r}")
 
+    async def _handle_user_remove(self, websocket: ServerConnection, data: ProtocolMessage):
+        try:
+            payload = UserRemovePayload(**data.payload)
+            if payload.user_id in self.known_users:
+                self.known_users.pop(payload.user_id, None)
+                self.logger.info(f"[USER REMOVE] {payload.user_id} removed (server={payload.server_id})")
+        except Exception as e:
+            self.logger.error(f"[USER REMOVE] failed: {e!r}")
 
 if __name__ == "__main__":
     srv = Introducer()
