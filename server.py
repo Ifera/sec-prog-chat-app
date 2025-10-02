@@ -50,9 +50,6 @@ class Server(BaseServer):
         # duplicate suppression for forwarded deliveries
         self.seen_ids: set[str] = set()
 
-        # reconnection serialization per sid
-        self._reconnect_locks: Dict[str, asyncio.Lock] = {}  # sid -> lock
-
     async def on_start(self):
         self._bg_tasks.add(asyncio.create_task(self.bootstrap_to_network(), name="bootstrap"))
 
@@ -293,6 +290,9 @@ class Server(BaseServer):
             payload = UserAdvertisePayload(**data.payload)
             origin_sid = data.from_
             self.user_locations[payload.user_id] = origin_sid
+            # save remote user to db if not present already
+            if not self.db.get_user(payload.user_id):
+                self.db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
             self.logger.info(f"[GOSSIP] user {payload.user_id} @ server {origin_sid}")
             # advertise to local clients about this new user
             await self._broadcast_local_user_advertise(payload.user_id, payload.pubkey)
@@ -340,7 +340,7 @@ class Server(BaseServer):
         self.db.add_user(user_id, payload.pubkey, "", "", {})
 
         # when a new user connects, we first advertise their identity to all other servers/peers and the introducer
-        # then we send the existing roster to the new user
+        # then we send the existing roster to the new user (both local and remote users) to ensure the new user learns about earlier users' pubkeys'
         # finally we advertise the new user to all local users (including the new one)
 
         # gossip advertise to other servers (including the introducer)
@@ -369,9 +369,10 @@ class Server(BaseServer):
 
     async def _send_roster_to_user(self, websocket: ServerConnection, new_user: str):
         """
-        Send USER_ADVERTISE for all known LOCAL users to a single websocket.
+        Send USER_ADVERTISE for all known LOCAL and REMOTE users to a single websocket.
         This ensures a newly joined user learns about earlier users' pubkeys.
         """
+        # Local users first
         for uid in list(self.local_users.keys()):
             if uid == new_user:
                 continue
@@ -384,12 +385,28 @@ class Server(BaseServer):
             req = create_body(MsgType.USER_ADVERTISE, self.server_id, new_user, payload)
 
             try:
-                self.logger.info(f"[ROSTER] sending local user: '{uid}' to new user: '{new_user}'")
                 await websocket.send(req)
+                self.logger.info(f"[ROSTER] sent local user: '{uid}' to new user: '{new_user}'")
             except Exception as e:
                 self.logger.error(f"[ROSTER] failed sending local user {uid} to {new_user}: {e!r}")
 
-            # TODO: send roster of remote users?
+        # Remote users (learned via gossip)
+        for uid, sid in list(self.user_locations.items()):
+            if sid == "local" or uid == new_user:
+                continue
+
+            rec = self.db.get_user(uid)
+            if not rec:
+                continue
+
+            payload = UserAdvertisePayload(user_id=uid, server_id=self.server_id, pubkey=rec["pubkey"], meta={}).model_dump()
+            req = create_body(MsgType.USER_ADVERTISE, self.server_id, sid, payload)
+
+            try:
+                await websocket.send(req)
+                self.logger.info(f"[ROSTER] sent remote user: '{uid}' to new user: '{new_user}'")
+            except Exception as e:
+                self.logger.error(f"[ROSTER] failed sending remote user {uid} to {sid}: {e!r}")
 
     async def _broadcast_local_user_advertise(self, user_id: str, pubkey: str):
         payload = UserAdvertisePayload(user_id=user_id, server_id=self.server_id, pubkey=pubkey, meta={}).model_dump()
