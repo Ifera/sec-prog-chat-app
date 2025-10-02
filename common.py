@@ -1,8 +1,11 @@
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Union, Optional
 
 from websockets import ClientConnection, ServerConnection
+
+from models import current_timestamp, MsgType
 
 
 @dataclass
@@ -14,3 +17,15 @@ class Peer:
     pubkey: Optional[str] = None
     last_seen: float = field(default_factory=lambda: time.time())
     missed: int = 0
+
+
+def create_body(typ: MsgType, frm: str, to: str, payload: dict, sig: str = "") -> str:
+    req = {
+        "type": typ.value,
+        "from": frm,
+        "to": to,
+        "ts": current_timestamp(),
+        "payload": payload,
+        "sig": sig
+    }
+    return json.dumps(req)

@@ -6,15 +6,17 @@ import sys
 from typing import Dict, Optional, Union
 
 from websockets.asyncio.client import connect, ClientConnection
-from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
 from websockets.asyncio.server import ServerConnection
+from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
 
+from common import create_body
 from config import config
 from crypto import (
     generate_rsa_keypair, load_private_key, load_public_key,
     rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig
 )
-from models import MsgType, current_timestamp, generate_uuid
+from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
+    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload
 
 logging.basicConfig(level=config.logging_level, format=config.logging_format)
 logger = logging.getLogger("Client")
@@ -45,7 +47,7 @@ class Client:
             try:
                 logger.info(f"connecting to {self.server_uri} (attempt {attempt}/{self._reconnect_attempts})")
                 # Small open timeout to fail fast if server isn’t listening.
-                self.websocket = await asyncio.wait_for(connect(self.server_uri), timeout=6)
+                self.websocket = await asyncio.wait_for(connect(self.server_uri, logger=logger), timeout=6)
                 await self._send_user_hello()
                 logger.info("connected and sent USER_HELLO")
                 # Start background listener
@@ -61,16 +63,9 @@ class Client:
 
     async def _send_user_hello(self):
         assert self.websocket is not None, "websocket not connected"
-        hello_payload = {"client": "client-v1.0", "pubkey": self.public_key_b64}
-        hello_msg = {
-            "type": MsgType.USER_HELLO,  # StrEnum -> JSON string
-            "from": self.user_id,  # use alias name 'from' for clarity
-            "to": "server",
-            "ts": current_timestamp(),
-            "payload": hello_payload,
-            "sig": ""
-        }
-        await self.websocket.send(json.dumps(hello_msg))
+        hello_pl = UserHelloPayload(client="local-cli-v1", pubkey=self.public_key_b64).model_dump()
+        body = create_body(MsgType.USER_HELLO, self.user_id, "server", hello_pl)
+        await self.websocket.send(body)
 
     async def listen(self):
         """Background listener; exits when the socket closes."""
@@ -81,48 +76,36 @@ class Client:
                 try:
                     data = json.loads(message)
                 except json.JSONDecodeError:
-                    logger.exception("invalid JSON from server")
+                    logger.error("Invalid JSON from server")
                     continue
-                await self.handle_message(data)
+                msg = ProtocolMessage(**data)
+                await self.handle_message(msg)
         except (ConnectionClosedOK, ConnectionClosedError) as e:
-            logger.info(f"connection closed: {e!r}")
-        except Exception:
-            logger.exception("listen loop crashed")
+            logger.info(f"Connection closed: {e!r}")
+        except Exception as e:
+            logger.error(f"Listen loop crashed: {e!r}")
 
-    async def handle_message(self, data: dict):
-        mtype = data.get("type")
-        if mtype == "USER_DELIVER":
-            await self._on_user_deliver(data)
-            return
+    async def handle_message(self, msg: ProtocolMessage):
+        mtype = msg.type
 
-        if mtype == "COMMAND_RESPONSE":
-            payload = data.get("payload", {})
-            if payload.get("command") == "list":
-                users = payload.get("users", [])
-                logger.info("Online users: %s", ", ".join(users))
-            return
+        match mtype:
+            case MsgType.USER_DELIVER:
+                await self._on_user_deliver(msg)
+            case MsgType.COMMAND_RESPONSE:
+                await self._handle_command_response(msg)
+            case MsgType.USER_ADVERTISE:
+                await self._handle_user_advertise(msg)
+            case MsgType.ERROR:
+                logger.error("ERROR: %s", msg.payload)
+            case _:
+                logger.error(f"Unknown message type: {mtype} for request: {msg}")
 
-        if mtype == "USER_ADVERTISE":
-            payload = data.get("payload", {})
-            uid = payload.get("user_id")
-            pub = payload.get("pubkey")
-            if uid and pub:
-                self.known_pubkeys[uid] = pub
-                logger.info("user online: %s", uid)
-            return
-
-        if mtype == "ERROR":
-            logger.error("ERROR: %s", data.get("payload"))
-            return
-
-        logger.debug("recv: %s", data)
-
-    async def _on_user_deliver(self, data: dict):
-        payload = data.get("payload", {})
+    async def _on_user_deliver(self, data: ProtocolMessage):
+        payload = UserDeliverPayload(**data.payload)
         try:
-            ciphertext = payload["ciphertext"]
-            sender_id = payload.get("sender")  # set by server on fanout
-            sender_pub = payload["sender_pub"]
+            ciphertext = payload.ciphertext
+            sender_id = payload.sender  # set by server on fanout
+            sender_pub = payload.sender_pub
             sender_pub_key = load_public_key(sender_pub)
 
             # Try to verify against the *sender id*, not the server id.
@@ -133,9 +116,9 @@ class Client:
                     sender_pub_key,
                     ciphertext,
                     sender_id,
-                    data.get("to"),
-                    data.get("ts"),
-                    payload.get("content_sig"),
+                    data.to,
+                    data.ts,
+                    payload.content_sig,
                 )
                 if not ok:
                     logger.debug("content_sig failed verification (best-effort)")
@@ -146,7 +129,26 @@ class Client:
             msg_txt = plaintext.decode("utf-8", errors="replace")
             print(f"[DM] {sender_id}: {msg_txt}")
         except Exception as e:
-            logger.exception("failed to decrypt/verify")
+            logger.exception(f"failed to decrypt/verify: {e!r}")
+
+    async def _handle_command_response(self, data: ProtocolMessage):
+        payload = CommandResponsePayload(**data.payload)
+        command = payload.command
+        response = json.loads(payload.response)
+        match command:
+            case "/list":
+                users = response.get("users", [])
+                logger.info("Online users: %s", ", ".join(users))
+            case _:
+                logger.error(f"Unknown command response: {command}")
+
+    async def _handle_user_advertise(self, data: ProtocolMessage):
+        payload = UserAdvertisePayload(**data.payload)
+        uid = payload.user_id
+        pub = payload.pubkey
+        if uid and pub:
+            self.known_pubkeys[uid] = pub
+            logger.info("user online: %s", uid)
 
     async def send_command(self, line: str):
         if not self.websocket:
@@ -162,38 +164,35 @@ class Client:
             target = parts[1]
             msg_text = " ".join(parts[2:])
             if target not in self.known_pubkeys:
-                logger.error("unknown user: %s", target)
+                logger.error("Unknown user: %s", target)
                 return
             target_pk = load_public_key(self.known_pubkeys[target])
             ciphertext = rsa_encrypt(target_pk, msg_text.encode("utf-8"))
             ts = current_timestamp()
-            content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, target,
-                                              ts)
-            dm_payload = {"ciphertext": ciphertext, "sender_pub": self.public_key_b64, "content_sig": content_sig,
-                          "sender": self.user_id}
-            dm = {"type": MsgType.MSG_DIRECT, "from": self.user_id, "to": target, "ts": ts, "payload": dm_payload,
-                  "sig": ""}
-            await self.websocket.send(json.dumps(dm))
+            content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, target, ts)
+            dm_pl = MsgDirectPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
+            body = create_body(MsgType.MSG_DIRECT, self.user_id, target, dm_pl)
+            await self.websocket.send(body)
             return
 
         if cmd == "/all" and len(parts) >= 2:
             msg_text = " ".join(parts[1:])
-            # Demo: public is signed but not encrypted (spec may allow RSA group key; omitted here)
+            # TODO: fix: public is signed but not encrypted (spec may allow RSA group key)
             ciphertext = msg_text
             ts = current_timestamp()
-            content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id,
-                                                     ts)
-            pub_payload = {"ciphertext": ciphertext, "sender_pub": self.public_key_b64, "content_sig": content_sig,
-                           "sender": self.user_id}
-            pub = {"type": MsgType.MSG_PUBLIC_CHANNEL, "from": self.user_id, "to": "public", "ts": ts,
-                   "payload": pub_payload, "sig": ""}
-            await self.websocket.send(json.dumps(pub))
+            content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, ts)
+            pub_pl = MsgPublicChannelPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
+            body = create_body(MsgType.MSG_PUBLIC_CHANNEL, self.user_id, "public", pub_pl)
+            await self.websocket.send(body)
             return
 
-        # default: /list
-        msg = {"type": MsgType.COMMAND, "from": self.user_id, "to": "server", "ts": current_timestamp(),
-               "payload": {"command": "/list"}, "sig": ""}
-        await self.websocket.send(json.dumps(msg))
+        if cmd == "/list":
+            comm_pl = CommandPayload(command="/list").model_dump()
+            body = create_body(MsgType.COMMAND, self.user_id, "server", comm_pl)
+            await self.websocket.send(body)
+            return
+
+        logger.error("Unknown command: %s", cmd)
 
     async def close(self):
         """Close the socket and cancel listener."""
@@ -240,16 +239,16 @@ async def interactive_client():
         return
 
     print("Commands:")
-    print("  /list")
-    print("  /tell <user> <msg>")
-    print("  /all <msg>")
-    print("  /quit")
+    print("- /list")
+    print("- /tell <user> <msg>")
+    print("- /all <msg>")
+    print("- /quit")
 
     loop = asyncio.get_running_loop()
     try:
         while True:
             try:
-                line = await loop.run_in_executor(None, input, "> ")
+                line = await loop.run_in_executor(None, input, "")
             except EOFError:
                 break
             line = (line or "").strip()
@@ -259,10 +258,9 @@ async def interactive_client():
                 break
             await client.send_command(line)
     except KeyboardInterrupt:
-        # graceful, no traceback
         pass
-    except Exception:
-        logger.exception("interactive loop error")
+    except Exception as e:
+        logger.error(f"Interactive loop error: {e!r}")
     finally:
         await client.close()
 
@@ -271,5 +269,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(interactive_client())
     except KeyboardInterrupt:
-        # swallow Ctrl+C at top level
         print()

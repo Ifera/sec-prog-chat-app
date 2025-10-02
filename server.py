@@ -13,7 +13,7 @@ from websockets.exceptions import (
 )
 
 from base_server import BaseServer
-from common import Peer
+from common import Peer, create_body
 from config import config
 from crypto import load_private_key, compute_transport_sig
 from database import Database
@@ -24,7 +24,7 @@ from models import (
     UserAdvertisePayload, UserRemovePayload, ServerDeliverPayload, UserHelloPayload, MsgDirectPayload,
     MsgPublicChannelPayload, ErrorPayload,
     UserDeliverPayload, CommandPayload,
-    current_timestamp, ServerType
+    ServerType, CommandResponsePayload
 )
 
 
@@ -34,8 +34,8 @@ class Server(BaseServer):
         super().__init__(
             server_type=ServerType.SERVER,
             logger=logging.getLogger("Server"),
-            ping_interval=15,
-            ping_timeout=45
+            ping_interval=config.heartbeat_interval,
+            ping_timeout=config.timeout_threshold
         )
         self.db = Database(config.db_path)
         self.introducer_ws: ClientConnection | None = None
@@ -85,15 +85,9 @@ class Server(BaseServer):
                         payload = ServerHelloJoinPayload(
                             host=config.host, port=config.port, pubkey=self.server_public_key
                         ).model_dump()
-                        join = {
-                            "type": MsgType.SERVER_HELLO_JOIN,
-                            "from": self.server_id,
-                            "to": f"{host}:{port}",
-                            "ts": current_timestamp(),
-                            "payload": payload,
-                            "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
-                        }
-                        await ws.send(json.dumps(join))
+                        sig = compute_transport_sig(load_private_key(self.server_private_key), payload)
+                        req = create_body(MsgType.SERVER_HELLO_JOIN, self.server_id, f"{host}:{port}", payload, sig)
+                        await ws.send(req)
                         self.logger.info(f"[BOOTSTRAP] Sent SERVER_HELLO_JOIN to Introducer at {uri}")
 
                         # receive SERVER_WELCOME from introducer
@@ -114,7 +108,8 @@ class Server(BaseServer):
                         # connect to other servers on the network by sending SERVER_ANNOUNCE
                         remote_servers_cnt = len(welcome.servers)
                         if remote_servers_cnt > 0:
-                            self.logger.info(f"[BOOTSTRAP] Connecting to remote servers ({remote_servers_cnt} found)...")
+                            self.logger.info(
+                                f"[BOOTSTRAP] Connecting to remote servers ({remote_servers_cnt} found)...")
                         else:
                             self.logger.info("[BOOTSTRAP] No remote servers found...")
 
@@ -122,9 +117,16 @@ class Server(BaseServer):
                             await self._connect_to_server(si.server_id, si.host, int(si.port), si.pubkey)
 
                         # maintain a list of clients connected already
+                        remote_clients_cnt = len(welcome.clients)
+                        if remote_clients_cnt > 0:
+                            self.logger.info(f"[BOOTSTRAP] Got {remote_clients_cnt} remote clients...")
+                        else:
+                            self.logger.info("[BOOTSTRAP] No remote clients found...")
+
                         for ci in welcome.clients:
-                            # TODO: handle clients from introducer
-                            pass
+                            self.user_locations[ci.user_id] = f"server_{ci.server_id}"
+
+                        self.logger.info("[BOOTSTRAP] Bootstrap complete")
 
                         # wait for this connection to close
                         await ws.wait_closed()
@@ -142,11 +144,10 @@ class Server(BaseServer):
         self.logger.warning("[BOOTSTRAP] All introducers unreachable; operating standalone for now.")
 
     async def _connect_to_server(self, sid: str, host: str, port: int, pubkey: Optional[str]):
-        """Create a persistent websocket to another server and send SERVER_ANNOUNCE during STARTUP or RECONNECT"""
         uri = f"ws://{host}:{port}/ws"
         try:
             # connect to the remote server
-            ws: ClientConnection = await connect(uri, ping_interval=5, ping_timeout=10)  # TODO: check
+            ws: ClientConnection = await connect(uri, logger=self.logger)
             peer = Peer(sid=sid, ws=ws, host=host, port=port, pubkey=pubkey)
             self.peers[sid] = peer
             self.server_addrs[sid] = (host, port)
@@ -157,15 +158,9 @@ class Server(BaseServer):
                 port=config.port,
                 pubkey=self.server_public_key,
             ).model_dump()
-            msg = {
-                "type": MsgType.SERVER_ANNOUNCE,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": payload,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
-            }
-            await ws.send(json.dumps(msg))
+            sig = compute_transport_sig(load_private_key(self.server_private_key), payload)
+            req = create_body(MsgType.SERVER_ANNOUNCE, self.server_id, sid, payload, sig)
+            await ws.send(req)
 
             # start listener for that server
             self._bg_tasks.add(asyncio.create_task(self._listen_server(peer), name=f"listen-{sid}"))
@@ -179,109 +174,16 @@ class Server(BaseServer):
 
     async def _broadcast_goodbye(self, reason: str = "shutdown"):
         payload = ServerGoodbyePayload(reason=reason).model_dump()
-        for sid in list(self.peers.keys()):
-            msg = {
-                "type": MsgType.SERVER_GOODBYE,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": payload,
-                "sig": "",
-            }
-            # best-effort; don't reconnect on goodbye
+        for sid, p in self.peers.items():
+            req = create_body(MsgType.SERVER_GOODBYE, self.server_id, sid, payload)
             try:
-                peer = self.peers.get(sid)
-                if peer:
-                    await peer.ws.send(json.dumps(msg))
+                await p.ws.send(req)
             except Exception:
                 pass
-
-    # ---------- reconnect & retry ----------
-    async def _await_peer_entry(self, sid: str, timeout: float = 1.0) -> bool:
-        """
-        Wait up to `timeout` for a reconnected peer entry to appear.
-        We don't rely on any `.closed` attribute (not provided by asyncio API).
-        """
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + max(0.05, timeout)
-        while loop.time() < deadline:
-            if sid in self.peers:
-                return True
-            await asyncio.sleep(0.05)
-        return False
-
-    async def _reconnect_peer(self, sid: str) -> bool:
-        """
-        Re-establish a server peer connection using self.server_addrs[sid].
-        Serialized per-sid to avoid races. Returns True if the peer entry exists after connect.
-        """
-        addr = self.server_addrs.get(sid)
-        if not addr:
-            return False
-
-        lock = self._reconnect_locks.setdefault(sid, asyncio.Lock())
-        async with lock:
-            if sid in self.peers:
-                return True
-
-            host, port = addr
-            try:
-                self.logger.info(f"[RECONNECT] dialing {sid} @ {host}:{port}")
-                await self._connect_to_server(sid, host, int(port), pubkey=None)
-
-                await self._await_peer_entry(sid, timeout=1.0)
-                # tiny settle to let remote process SERVER_ANNOUNCE
-                await asyncio.sleep(0.1)
-
-                ok = sid in self.peers
-                if ok:
-                    self.logger.info(f"[RECONNECT] {sid} restored")
-                else:
-                    self.logger.warning(f"[RECONNECT] {sid} still absent")
-                return ok
-            except Exception as e:
-                self.logger.error(f"[RECONNECT] failed for {sid}: {e!r}")
-                return False
-
-    async def _send_with_retry(self, sid: str, msg: dict) -> bool:
-        """
-        Send `msg` to peer `sid`. If the first send fails due to a websocket issue,
-        try a single reconnect and re-send. Returns True if sent.
-        """
-        # First attempt
-        try:
-            peer = self.peers.get(sid)
-            if not peer:
-                return False
-            await peer.ws.send(json.dumps(msg))
-            return True
-        except (ConnectionClosedError, ConnectionClosedOK, WebSocketException):
-            # try to reconnect and retry once
-            if await self._reconnect_peer(sid):
-                try:
-                    peer2 = self.peers.get(sid)
-                    if not peer2:
-                        return False
-                    await peer2.ws.send(json.dumps(msg))
-                    return True
-                except (ConnectionClosedOK, ConnectionClosedError, WebSocketException):
-                    # remote closed immediately after reconnect; prune silently
-                    await self._on_peer_closed(sid)
-                    return False
-                except Exception as e:
-                    self.logger.error(f"[SEND-RETRY] retry send to {sid} failed after reconnect: {e!r}")
-                    return False
-            # couldn't reconnect
-            self.logger.warning(f"[SEND-RETRY] {sid} unreachable; dropping message")
-            return False
-        except Exception as e:
-            self.logger.error(f"[SEND] send to {sid} failed: {e!r}")
-            return False
 
     # ---------- peer close ----------
     def _forget_peer(self, sid: str):
         self.peers.pop(sid, None)
-        # keep server_addrs to allow reconnect attempts later
 
     # ---------- incoming handling ----------
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
@@ -396,140 +298,62 @@ class Server(BaseServer):
         self.user_locations[user_id] = "local"
         self.db.add_user(user_id, payload.pubkey, "", "", {})
 
-        # 1) Send existing roster (local + remote) to the NEW user
-        await self._send_roster_to_user(websocket, exclude_user=user_id)
+        # when a new user connects, we first advertise their identity to all other servers/peers and the introducer
+        # then we send the existing roster to the new user
+        # finally we advertise the new user to all local users (including the new one)
 
-        # 2) Gossip advertise to other servers
+        # gossip advertise to other servers (including the introducer)
         await self._gossip_user_advertise(user_id, payload.pubkey)
 
-        # 3) Tell all local users (including the new one) about this new user
+        # send the existing roster to the NEW user
+        await self._send_roster_to_user(websocket, user_id)
+
+        # tell all local users (including the new one) about this new user
         await self._broadcast_local_user_advertise(user_id, payload.pubkey)
-
-    async def _send_roster_to_user(self, websocket: ServerConnection, exclude_user: Optional[str] = None):
-        """
-        Send USER_ADVERTISE for all known users (local + remote) to a single websocket.
-        This ensures a newly joined user learns about earlier users' pubkeys.
-        """
-        # Local users first
-        for uid in list(self.local_users.keys()):
-            if uid == exclude_user:
-                continue
-            rec = self.db.get_user(uid)
-            if not rec:
-                continue
-            advertise = {
-                "type": MsgType.USER_ADVERTISE,
-                "from": self.server_id,
-                "to": "*",
-                "ts": current_timestamp(),
-                "payload": {
-                    "user_id": uid,
-                    "server_id": self.server_id,
-                    "pubkey": rec["pubkey"],
-                    "meta": {}
-                },
-                "sig": ""
-            }
-            try:
-                await websocket.send(json.dumps(advertise))
-            except Exception as e:
-                self.logger.error(f"[ROSTER] failed to send local user {uid}: {e!r}")
-
-        # Remote users (learned via gossip)
-        for uid, loc in list(self.user_locations.items()):
-            if loc == "local" or uid == exclude_user:
-                continue
-            rec = self.db.get_user(uid)
-            if not rec:
-                continue
-            try:
-                server_id = loc.split("_", 1)[1]
-            except Exception:
-                server_id = "unknown"
-
-            advertise = {
-                "type": MsgType.USER_ADVERTISE,
-                "from": self.server_id,
-                "to": "*",
-                "ts": current_timestamp(),
-                "payload": {
-                    "user_id": uid,
-                    "server_id": server_id,
-                    "pubkey": rec["pubkey"],
-                    "meta": {}
-                },
-                "sig": ""
-            }
-            try:
-                await websocket.send(json.dumps(advertise))
-            except Exception as e:
-                self.logger.error(f"[ROSTER] failed to send remote user {uid}: {e!r}")
-
-    async def _broadcast_user_remove(self, user_id: str):
-        """Inform remote servers that a local user has gone away."""
-        payload = UserRemovePayload(user_id=user_id, server_id=self.server_id).model_dump()
-        for sid in list(self.peers.keys()):
-            msg = {
-                "type": MsgType.USER_REMOVE,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": payload,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
-            }
-            await self._send_with_retry(sid, msg)
-
-    async def _broadcast_local_user_remove(self, user_id: str):
-        """Tell local clients a user has gone (optional UX consistency)."""
-        remove = {
-            "type": MsgType.USER_REMOVE,
-            "from": self.server_id,
-            "to": "*",
-            "ts": current_timestamp(),
-            "payload": {
-                "user_id": user_id,
-                "server_id": self.server_id
-            },
-            "sig": ""
-        }
-        for _, ws in list(self.local_users.items()):
-            try:
-                await ws.send(json.dumps(remove))
-            except (ConnectionClosedError, ConnectionClosedOK):
-                pass
-            except Exception as e:
-                self.logger.error(f"[LOCAL-REMOVE] failed to send to client: {e!r}")
 
     async def _gossip_user_advertise(self, user_id: str, pubkey: str):
         payload = UserAdvertisePayload(user_id=user_id, server_id=self.server_id, pubkey=pubkey, meta={}).model_dump()
-        for sid in list(self.peers.keys()):
-            msg = {
-                "type": MsgType.USER_ADVERTISE,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": payload,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), payload),
-            }
-            await self._send_with_retry(sid, msg)
+        sig = compute_transport_sig(load_private_key(self.server_private_key), payload)
+        req = create_body(MsgType.USER_ADVERTISE, self.server_id, "*", payload, sig)
+
+        # fan-out to all connected servers
+        for sid, peer in self.peers.items():
+            await peer.ws.send(req)
+
+        # fan-out to the introducer
+        if self.introducer_ws:
+            await self.introducer_ws.send(req)
+
+    async def _send_roster_to_user(self, websocket: ServerConnection, exclude_user: str):
+        """
+        Send USER_ADVERTISE for all known LOCAL users to a single websocket.
+        This ensures a newly joined user learns about earlier users' pubkeys.
+        """
+        for uid in list(self.local_users.keys()):
+            if uid == exclude_user:
+                continue
+
+            rec = self.db.get_user(uid)
+            if not rec:
+                continue
+
+            payload = UserAdvertisePayload(user_id=uid, server_id=self.server_id, pubkey=rec["pubkey"], meta={}).model_dump()
+            req = create_body(MsgType.USER_ADVERTISE, self.server_id, exclude_user, payload)
+
+            try:
+                await websocket.send(req)
+            except Exception as e:
+                self.logger.error(f"[ROSTER] failed sending local user {uid} to {exclude_user}: {e!r}")
+
+            # TODO: send roster of remote users?
 
     async def _broadcast_local_user_advertise(self, user_id: str, pubkey: str):
-        advertise = {
-            "type": MsgType.USER_ADVERTISE,
-            "from": self.server_id,
-            "to": "*",
-            "ts": current_timestamp(),
-            "payload": {
-                "user_id": user_id,
-                "server_id": self.server_id,
-                "pubkey": pubkey,
-                "meta": {}
-            },
-            "sig": ""
-        }
-        for _, ws in list(self.local_users.items()):
+        payload = UserAdvertisePayload(user_id=user_id, server_id=self.server_id, pubkey=pubkey, meta={}).model_dump()
+
+        for uid, ws in list(self.local_users.items()):
+            req = create_body(MsgType.USER_ADVERTISE, self.server_id, uid, payload)
             try:
-                await ws.send(json.dumps(advertise))
+                await ws.send(req)
             except (ConnectionClosedError, ConnectionClosedOK):
                 pass
             except Exception as e:
@@ -540,23 +364,17 @@ class Server(BaseServer):
         target = msg.to
 
         # deliver locally if present
-        if target in self.local_users:
-            deliver = UserDeliverPayload(
+        if target in self.local_users.items():
+            deliver_pl = UserDeliverPayload(
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
                 content_sig=payload.content_sig
             ).model_dump()
-            out = {
-                "type": MsgType.USER_DELIVER,
-                "from": self.server_id,
-                "to": target,
-                "ts": current_timestamp(),
-                "payload": deliver,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), deliver)
-            }
+            sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
+            req = create_body(MsgType.USER_DELIVER, self.server_id, target, deliver_pl, sig)
             try:
-                await self.local_users[target].send(json.dumps(out))
+                await self.local_users[target].send(req)
             except Exception as e:
                 self.logger.error(f"[DM] failed to deliver to local user {target}: {e!r}")
             return
@@ -565,23 +383,18 @@ class Server(BaseServer):
         loc = self.user_locations.get(target)
         if loc and loc.startswith("server_"):
             sid = loc.replace("server_", "")
-            fwd = ServerDeliverPayload(
-                user_id=target,
-                ciphertext=payload.ciphertext,
-                sender=msg.from_,
-                sender_pub=payload.sender_pub,
-                content_sig=payload.content_sig
-            ).model_dump()
-            out = {
-                "type": MsgType.SERVER_DELIVER,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": fwd,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), fwd)
-            }
-            await self._send_with_retry(sid, out)
-            return
+            if sid in self.peers:
+                fwd_pl = ServerDeliverPayload(
+                    user_id=target,
+                    ciphertext=payload.ciphertext,
+                    sender=msg.from_,
+                    sender_pub=payload.sender_pub,
+                    content_sig=payload.content_sig
+                ).model_dump()
+                sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
+                req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
+                await self.peers[sid].ws.send(req)
+                return
 
         self.logger.warning(f"[ERROR-UP] {ErrorCode.USER_NOT_FOUND}: {target} not registered")
 
@@ -590,45 +403,33 @@ class Server(BaseServer):
 
         # broadcast to local users
         for uid, ws in list(self.local_users.items()):
-            deliver = UserDeliverPayload(
+            deliver_pl = UserDeliverPayload(
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
                 content_sig=payload.content_sig
             ).model_dump()
-            out = {
-                "type": MsgType.USER_DELIVER,
-                "from": self.server_id,
-                "to": uid,
-                "ts": current_timestamp(),
-                "payload": deliver,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), deliver)
-            }
+            sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
+            req = create_body(MsgType.USER_DELIVER, self.server_id, uid, deliver_pl, sig)
             try:
-                await ws.send(json.dumps(out))
+                await ws.send(req)
             except (ConnectionClosedError, ConnectionClosedOK):
                 pass
             except Exception as e:
                 self.logger.error(f"[PUB] local deliver to {uid} failed: {e!r}")
 
         # forward to other servers (fan-out)
-        for sid in list(self.peers.keys()):
-            fwd = ServerDeliverPayload(
+        for sid, p in self.peers.items():
+            fwd_pl = ServerDeliverPayload(
                 user_id="public",
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
                 content_sig=payload.content_sig
             ).model_dump()
-            out = {
-                "type": MsgType.SERVER_DELIVER,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": fwd,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), fwd)
-            }
-            await self._send_with_retry(sid, out)
+            sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
+            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig)
+            await p.ws.send(req)
 
     async def _handle_user_advertise(self, data: ProtocolMessage):
         try:
@@ -660,62 +461,47 @@ class Server(BaseServer):
             self.seen_ids.add(key)
 
             if payload.user_id in self.local_users:
-                deliver = UserDeliverPayload(
+                deliver_pl = UserDeliverPayload(
                     ciphertext=payload.ciphertext,
                     sender=payload.sender,
                     sender_pub=payload.sender_pub,
                     content_sig=payload.content_sig
                 ).model_dump()
-                out = {
-                    "type": MsgType.USER_DELIVER,
-                    "from": self.server_id,
-                    "to": payload.user_id,
-                    "ts": current_timestamp(),
-                    "payload": deliver,
-                    "sig": compute_transport_sig(load_private_key(self.server_private_key), deliver)
-                }
+                sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
+                req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig)
                 try:
-                    await self.local_users[payload.user_id].send(json.dumps(out))
+                    await self.local_users[payload.user_id].send(req)
                 except Exception as e:
                     self.logger.error(f"[FWD] deliver to {payload.user_id} failed: {e!r}")
         except Exception as e:
             self.logger.error(f"[FWD] server_deliver failed: {e!r}")
 
     # ---------- commands ----------
-    async def _handle_command(self, websocket: ServerConnection, msg: ProtocolMessage):
-        payload = CommandPayload(**msg.payload)
+    async def _handle_command(self, websocket: ServerConnection, data: ProtocolMessage):
+        payload = CommandPayload(**data.payload)
         cmd = payload.command.strip().lower()
+        # TODO: improve command handling
         if cmd == "/list":
             users = sorted(
                 list(self.local_users.keys())
                 + [u for u, loc in self.user_locations.items() if loc != "local"]
             )
-            resp = {
-                "type": "COMMAND_RESPONSE",
-                "from": self.server_id,
-                "to": msg.from_,
-                "ts": current_timestamp(),
-                "payload": {"command": "list", "users": users},
-                "sig": ""
+            response = {
+                "users": users,
             }
+            res_pl = CommandResponsePayload(command=cmd, response=json.dumps(response)).model_dump()
+            body = create_body(MsgType.COMMAND_RESPONSE, self.server_id, data.from_, res_pl)
             try:
-                await websocket.send(json.dumps(resp))
+                await websocket.send(body)
             except Exception as e:
                 self.logger.error(f"[CMD] /list response failed: {e!r}")
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):
         payload = ErrorPayload(code=code, detail=detail).model_dump()
-        out = {
-            "type": MsgType.ERROR,
-            "from": self.server_id,
-            "to": "*",
-            "ts": current_timestamp(),
-            "payload": payload,
-            "sig": ""
-        }
+        body = create_body(MsgType.ERROR, self.server_id, "*", payload)
         try:
-            await ws.send(json.dumps(out))
+            await ws.send(body)
         except Exception as e:
             self.logger.error(f"[ERROR->client] failed to send error: {e!r}")
 

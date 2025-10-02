@@ -30,6 +30,7 @@ class MsgType(StrEnum):
     PUBLIC_CHANNEL_UPDATED = "PUBLIC_CHANNEL_UPDATED"
     PUBLIC_CHANNEL_KEY_SHARE = "PUBLIC_CHANNEL_KEY_SHARE"
     COMMAND = "COMMAND"
+    COMMAND_RESPONSE = "COMMAND_RESPONSE"
 
 
 class ErrorCode(StrEnum):
@@ -72,6 +73,7 @@ class ClientInfo(BaseModel):
     host: str
     port: int
     pubkey: str
+    server_id: str
 
 
 class ServerWelcomePayload(BaseModel):
@@ -172,6 +174,11 @@ class UserDeliverPayload(BaseModel):
     sender: str
     sender_pub: str
     content_sig: str
+
+
+class CommandResponsePayload(BaseModel):
+    command: str
+    response: str
 
 
 def generate_uuid() -> str:

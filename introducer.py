@@ -1,16 +1,15 @@
 import asyncio
-import json
 import logging
 from typing import Dict
 
 from websockets.asyncio.server import ServerConnection
 
 from base_server import BaseServer
-from common import Peer
+from common import Peer, create_body
 from crypto import load_private_key, compute_transport_sig
 from models import (
     MsgType, ServerHelloJoinPayload, ServerWelcomePayload, ServerInfo,
-    current_timestamp, generate_uuid, ServerType, ClientInfo, UserAdvertisePayload, ProtocolMessage
+    generate_uuid, ServerType, ClientInfo, UserAdvertisePayload, ProtocolMessage
 )
 
 
@@ -43,10 +42,10 @@ class Introducer(BaseServer):
                 await self._handle_server_join(websocket, data)
             case MsgType.HEARTBEAT:
                 pass
-            # case MsgType.USER_ADVERTISE:
-            #     await self._handle_user_advertise(websocket, data)
+            case MsgType.USER_ADVERTISE:
+                await self._handle_user_advertise(websocket, data)
             # case MsgType.USER_REMOVE:
-            #     await self._handle_user_remove(websocket, data)
+            #     await self._handle_user_remove(websocket, data) TODO
             case _:
                 self.logger.error(f"[INCOMING] unknown request type: {req_type}")
                 await websocket.close()
@@ -72,22 +71,16 @@ class Introducer(BaseServer):
                 if not u:
                     continue
                 clients_payload.append(
-                    ClientInfo(user_id=uid, host=u["host"], port=int(u["port"]), pubkey=u["pubkey"]).model_dump()
+                    ClientInfo(user_id=uid, host=u["host"], port=int(u["port"]), pubkey=u["pubkey"], server_id=u["server_id"]).model_dump()
                 )
 
             # INTRODUCER responds with SERVER_WELCOME
-            welcome = ServerWelcomePayload(assigned_id=assigned_id, servers=servers_payload,
-                                           clients=clients_payload).model_dump()
-            msg = {
-                "type": MsgType.SERVER_WELCOME,
-                "from": self.server_id,
-                "to": data.from_,
-                "ts": current_timestamp(),
-                "payload": welcome,
-                "sig": compute_transport_sig(load_private_key(self.server_private_key), welcome),
-            }
+            welcome_pl = ServerWelcomePayload(assigned_id=assigned_id, servers=servers_payload,
+                                              clients=clients_payload).model_dump()
+            sig = compute_transport_sig(load_private_key(self.server_private_key), welcome_pl)
+            req = create_body(MsgType.SERVER_WELCOME, self.server_id, data.from_, welcome_pl, sig)
             self.logger.info(f"[JOIN] Sending welcome to {assigned_id} @ {payload.host}:{payload.port}")
-            await websocket.send(json.dumps(msg))
+            await websocket.send(req)
 
             self.logger.info(f"[JOIN] Registered new server {assigned_id} @ {payload.host}:{payload.port}")
 
@@ -96,12 +89,12 @@ class Introducer(BaseServer):
         except Exception as e:
             self.logger.error(f"[JOIN] failed to handle server join: {e!r}")
 
-    async def _handle_user_advertise(self, websocket: ServerConnection, data: dict):
+    async def _handle_user_advertise(self, websocket: ServerConnection, data: ProtocolMessage):
         try:
-            payload = UserAdvertisePayload(**data["payload"])
-            # server =
-            self.known_users[payload.user_id] = {"host": payload.host, "port": payload.port, "pubkey": payload.pubkey}
-            self.logger.info(f"[USER ADVERTISE] User {payload.user_id} @ {payload.host}:{payload.port}")
+            payload = UserAdvertisePayload(**data.payload)
+            host, port = websocket.local_address
+            self.known_users[payload.user_id] = {"host": host, "port": port, "pubkey": payload.pubkey, "server_id": payload.server_id}
+            self.logger.info(f"[USER ADVERTISE] User {payload.user_id} @ {host}:{port} from server {payload.server_id}")
         except Exception as e:
             self.logger.error(f"[USER ADVERTISE] failed to handle user advertise: {e!r}")
 

@@ -10,12 +10,12 @@ from websockets.exceptions import (
     ConnectionClosedOK,
 )
 
-from common import Peer
+from common import Peer, create_body
 from config import config
 from crypto import generate_rsa_keypair
 from models import (
     MsgType, HeartbeatPayload,
-    current_timestamp, generate_uuid, ServerType, ProtocolMessage
+    generate_uuid, ServerType, ProtocolMessage
 )
 
 logging.basicConfig(level=config.logging_level, format=config.logging_format)
@@ -114,16 +114,9 @@ class BaseServer:
     # ---------- HEALTH / HEARTBEAT ----------
     async def _probe_peer(self, sid: str, peer: Peer) -> bool:
         try:
-            hb = {
-                "type": MsgType.HEARTBEAT,
-                "from": self.server_id,
-                "to": sid,
-                "ts": current_timestamp(),
-                "payload": HeartbeatPayload(server_type=self.server_type).model_dump(),
-                "sig": "",
-            }
-            enc_hb = json.dumps(hb)
-            await peer.ws.send(enc_hb)
+            hb_pl = HeartbeatPayload(server_type=self.server_type).model_dump()
+            req = create_body(MsgType.HEARTBEAT, self.server_id, sid, hb_pl)
+            await peer.ws.send(req)
             return True
         except Exception as e:
             self.logger.error(f"[PROBE] failed to {sid} @ {peer.host}:{peer.port}")
@@ -131,12 +124,6 @@ class BaseServer:
             return False
 
     async def _health_monitor(self):
-        """
-        Every HEARTBEAT_INTERVAL seconds:
-          1) Open a NEW websocket connection to each peer's host:port
-          2) Send app-level HEARTBEAT over that fresh connection (probe)
-          3) If probe fails repeatedly or last_seen is too old, drop peer
-        """
         hb_interval = max(3, int(config.heartbeat_interval))
         timeout_s = max(hb_interval * 2, int(config.timeout_threshold))
 
