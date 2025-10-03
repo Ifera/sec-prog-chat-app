@@ -15,7 +15,7 @@ from websockets.exceptions import (
 from base_server import BaseServer
 from common import Peer, create_body
 from config import config
-from crypto import load_private_key, compute_transport_sig, compute_key_share_sig
+from crypto import load_private_key, compute_transport_sig, compute_key_share_sig, rsa_decrypt
 from database import Database
 from models import (
     MsgType, ErrorCode,
@@ -271,6 +271,8 @@ class Server(BaseServer):
             pl = ServerAnnouncePayload(**data.payload)
             sid = data.from_
 
+            is_new_server = sid not in self.peers
+
             if sid in self.peers:
                 peer = self.peers[sid]
                 peer.ws = websocket
@@ -283,6 +285,10 @@ class Server(BaseServer):
                 self.peers[sid] = Peer(sid=sid, ws=websocket, host=pl.host, port=pl.port, pubkey=pl.pubkey)
 
             self.server_addrs[sid] = (pl.host, pl.port)
+
+            # If this is a new server (first connection), send current public channel state
+            if is_new_server:
+                await self._send_public_channel_to_server(sid)
         except Exception as e:
             self.logger.error(f"[ANNOUNCE] failed: {e!r}")
 
@@ -333,6 +339,7 @@ class Server(BaseServer):
                     await self._handle_public_channel_updated(data)
                     await self._forward_public_channel_updated(data)
                 case MsgType.PUBLIC_CHANNEL_KEY_SHARE:
+                    await self._handle_public_channel_key_share(data)
                     await self._forward_public_channel_key_share(data)
                 case _:
                     self.logger.error(f"[USER] Unknown request type: {req_type}")
@@ -692,7 +699,57 @@ class Server(BaseServer):
             self.db.update_group_version("public", payload.version)
             for wrap in payload.wraps:
                 self.db.add_group_member("public", wrap['member_id'], "member", wrap['wrapped_key'])
-                # Optionally, if server knows the pub, decrypt to get key, but for now, rely on shares
+                # DB is updated; clients will handle shares
+
+    async def _handle_public_channel_key_share(self, data: ProtocolMessage):
+        if data.from_ == self.server_id:
+            return
+
+        payload = PublicChannelKeySharePayload(**data.payload)
+        for share in payload.shares:
+            uid = share['member']
+            user = self.db.get_user(uid)
+            if user:
+                try:
+                    group_key = rsa_decrypt(load_private_key(user['pubkey']), share['wrapped_public_channel_key'])
+                    self.db.set_group_key("public", group_key, self.server_public_key)
+                    self.logger.info("Updated group key from key share")
+                    return  # no need to try others
+                except:
+                    pass
+
+    async def _send_public_channel_to_server(self, sid: str):
+        group = self.db.get_group("public")
+        if not group or group.get('version', 1) <= 1:
+            return  # no data to send
+
+        members = self.db.get_group_members("public")
+        if not members:
+            return
+
+        # Send PUBLIC_CHANNEL_UPDATED
+        wraps = [{"member_id": uid, "wrapped_key": info['wrapped_key']} for uid, info in members.items()]
+        updated_pl = PublicChannelUpdatedPayload(version=group['version'], wraps=wraps).model_dump()
+        sig = compute_transport_sig(load_private_key(self.server_private_key), updated_pl)
+        req_upd = create_body(MsgType.PUBLIC_CHANNEL_UPDATED, self.server_id, sid, updated_pl, sig, ts=current_timestamp())
+
+        # Send PUBLIC_CHANNEL_KEY_SHARE
+        shares = [{"member": uid, "wrapped_public_channel_key": info['wrapped_key']} for uid, info in members.items()]
+        content_sig = compute_key_share_sig(load_private_key(self.server_private_key), shares, self.server_public_key)
+        ks_pl = PublicChannelKeySharePayload(shares=shares, creator_pub=self.server_public_key, content_sig=content_sig).model_dump()
+        sig_ks = compute_transport_sig(load_private_key(self.server_private_key), ks_pl)
+        req_ks = create_body(MsgType.PUBLIC_CHANNEL_KEY_SHARE, self.server_id, sid, ks_pl, sig_ks, ts=current_timestamp())
+
+        peer = self.peers.get(sid)
+        if peer:
+            try:
+                await peer.ws.send(req_upd)
+                await peer.ws.send(req_ks)
+                self.logger.info(f"[SYNC-PUB] Sent current public channel to new server {sid}")
+            except Exception as e:
+                self.logger.error(f"[SYNC-PUB] Failed to send to {sid}: {e!r}")
+        else:
+            self.logger.warning(f"[SYNC-PUB] No peer found for {sid}")
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):
