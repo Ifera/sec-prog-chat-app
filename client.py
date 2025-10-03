@@ -159,12 +159,16 @@ class Client:
         uid = payload.user_id
         pub = payload.pubkey
         if uid and pub:
+            exists = uid in self.known_pubkeys
             self.known_pubkeys[uid] = pub
-            logger.info("user online: %s", uid)
+            if not exists:
+                logger.info("user online: %s", uid)
 
     async def _handle_user_remove(self, data: ProtocolMessage):
         try:
             pl = UserRemovePayload(**data.payload)
+            if pl.user_id not in self.known_pubkeys:
+                return
             self.known_pubkeys.pop(pl.user_id, None)
             logger.info("User offline: %s", pl.user_id)
         except Exception as e:

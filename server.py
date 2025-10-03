@@ -124,6 +124,8 @@ class Server(BaseServer):
 
                         for ci in welcome.clients:
                             self.user_locations[ci.user_id] = ci.server_id
+                            # Add to db for pubkey access
+                            self.db.add_user(ci.user_id, ci.pubkey, "", "", {})
 
                         self.logger.info("[BOOTSTRAP] Bootstrap complete")
 
