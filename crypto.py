@@ -1,10 +1,14 @@
 import base64
+import hashlib
 import json
+import os
 from typing import Tuple
 
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding as sym_padding
 
 
 def base64url_encode(data: bytes) -> str:
@@ -113,3 +117,37 @@ def compute_transport_sig(private_key: rsa.RSAPrivateKey, payload: dict) -> str:
 def verify_transport_sig(public_key: rsa.RSAPublicKey, payload: dict, sig_b64: str) -> bool:
     canonical = canonicalize_payload(payload)
     return rsa_verify(public_key, canonical.encode('utf-8'), sig_b64)
+
+
+def generate_aes_key() -> bytes:
+    return os.urandom(32)  # 256 bits
+
+
+def aes_encrypt(key: bytes, plaintext: bytes) -> str:
+    iv = os.urandom(16)  # AES GCM IV
+    cipher = Cipher(algorithms.AES(key), modes.GCM(iv), backend=default_backend())
+    encryptor = cipher.encryptor()
+    ciphertext = encryptor.update(plaintext) + encryptor.finalize()
+    combined = iv + encryptor.tag + ciphertext
+    return base64url_encode(combined)
+
+
+def aes_decrypt(key: bytes, ciphertext_b64: str) -> bytes:
+    combined = base64url_decode(ciphertext_b64)
+    iv = combined[:16]
+    tag = combined[16:32]
+    ciphertext = combined[32:]
+    cipher = Cipher(algorithms.AES(key), modes.GCM(iv, tag), backend=default_backend())
+    decryptor = cipher.decryptor()
+    plaintext = decryptor.update(ciphertext) + decryptor.finalize()
+    return plaintext
+
+
+def compute_key_share_sig(private_key: rsa.RSAPrivateKey, shares: list, creator_pub: str) -> str:
+    canonical_shares = json.dumps(shares, sort_keys=True, separators=(',', ':'))
+    data = canonical_shares + creator_pub
+    return rsa_sign(private_key, data.encode('utf-8'))
+
+
+def get_fixed_group_key() -> bytes:
+    return hashlib.sha256(b"public_channel_fixed_key_v1").digest()[:32]

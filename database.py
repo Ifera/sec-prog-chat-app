@@ -137,3 +137,54 @@ class Database:
             cur.execute("DELETE FROM users WHERE user_id = ?", (user_id,))
             cur.execute("DELETE FROM group_members WHERE member_id = ?", (user_id,))
             conn.commit()
+
+    def get_group_key(self, group_id: str, server_private_key_b64: str) -> Optional[bytes]:
+        from crypto import load_private_key, rsa_decrypt
+        group = self.get_group(group_id)
+        if group and group['meta']:  # use meta for encrypted key
+            try:
+                encrypted_key_b64 = group['meta'].get('encrypted_group_key')
+                if encrypted_key_b64:
+                    server_priv = load_private_key(server_private_key_b64)
+                    return rsa_decrypt(server_priv, encrypted_key_b64)
+            except:
+                pass
+        return None
+
+    def set_group_key(self, group_id: str, key: bytes, server_public_key_b64: str):
+        from crypto import load_public_key, rsa_encrypt
+        pub_key = load_public_key(server_public_key_b64)
+        encrypted = rsa_encrypt(pub_key, key)
+        # store in meta
+        with sqlite3.connect(self.db_path) as conn:
+            cur = conn.cursor()
+            group = self.get_group(group_id)
+            meta = group['meta'] if group else {}
+            meta['encrypted_group_key'] = encrypted
+            meta_json = json.dumps(meta)
+            cur.execute("UPDATE groups SET meta = ? WHERE group_id = ?", (meta_json, group_id))
+            conn.commit()
+
+    def add_user_to_public_channel(self, user_id: str, pubkey: str, server_private_key_b64: str, server_public_key_b64: str):
+        group = self.get_group("public")
+        if not group:
+            return False
+        members = self.get_group_members("public")
+        if user_id in members:
+            return False  # already member
+
+        # get fixed group_key
+        from crypto import get_fixed_group_key
+        group_key = get_fixed_group_key()
+
+        # wrap group_key with user's pub
+        from crypto import load_public_key, rsa_encrypt
+        user_pub = load_public_key(pubkey)
+        wrapped_key = rsa_encrypt(user_pub, group_key)
+
+        # add member
+        self.add_group_member("public", user_id, "member", wrapped_key)
+
+        # bump version (since membership change)
+        self.update_group_version("public", group['version'] + 1)
+        return True

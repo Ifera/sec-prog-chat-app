@@ -174,6 +174,7 @@ class UserDeliverPayload(BaseModel):
     sender: str
     sender_pub: str
     content_sig: str
+    channel: str = "dm"
 
 
 class CommandResponsePayload(BaseModel):

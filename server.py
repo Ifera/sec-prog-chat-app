@@ -15,7 +15,7 @@ from websockets.exceptions import (
 from base_server import BaseServer
 from common import Peer, create_body
 from config import config
-from crypto import load_private_key, compute_transport_sig
+from crypto import load_private_key, compute_transport_sig, compute_key_share_sig
 from database import Database
 from models import (
     MsgType, ErrorCode,
@@ -24,7 +24,8 @@ from models import (
     UserAdvertisePayload, UserRemovePayload, ServerDeliverPayload, UserHelloPayload, MsgDirectPayload,
     MsgPublicChannelPayload, ErrorPayload,
     UserDeliverPayload, CommandPayload,
-    ServerType, CommandResponsePayload
+    ServerType, CommandResponsePayload,
+    PublicChannelUpdatedPayload, PublicChannelKeySharePayload, current_timestamp
 )
 
 
@@ -247,12 +248,14 @@ class Server(BaseServer):
                 return
             self.seen_ids.add(key)
 
+            channel = "dm" if payload.user_id != "public" else "public"
             if payload.user_id in self.local_users:
                 deliver_pl = UserDeliverPayload(
                     ciphertext=payload.ciphertext,
                     sender=payload.sender,
                     sender_pub=payload.sender_pub,
-                    content_sig=payload.content_sig
+                    content_sig=payload.content_sig,
+                    channel=channel
                 ).model_dump()
                 sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
                 req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig, ts=data.ts)
@@ -311,6 +314,7 @@ class Server(BaseServer):
             if self.user_locations.get(user_id) == origin_sid:
                 await self._cleanup_local_user(user_id, reason=f"gossip-removed-by-{origin_sid}", is_remote_call=True)
                 self.logger.info(f"[GOSSIP] user {payload.user_id} removed")
+                await self._broadcast_local_user_remove(user_id)
         except Exception as e:
             self.logger.error(f"[GOSSIP] _handle_user_remove failed: {e!r}")
 
@@ -325,6 +329,10 @@ class Server(BaseServer):
                     await self._handle_msg_public(data)
                 case MsgType.COMMAND:
                     await self._handle_command(websocket, data)
+                case MsgType.PUBLIC_CHANNEL_UPDATED:
+                    await self._forward_public_channel_updated(data)
+                case MsgType.PUBLIC_CHANNEL_KEY_SHARE:
+                    await self._forward_public_channel_key_share(data)
                 case _:
                     self.logger.error(f"[USER] Unknown request type: {req_type}")
         except (ConnectionClosedOK, ConnectionClosedError):
@@ -343,6 +351,10 @@ class Server(BaseServer):
         self.user_locations[user_id] = "local"
         self.ws_to_user[websocket] = user_id
         self.db.add_user(user_id, payload.pubkey, "", "", {})
+
+        # Add user to public channel and broadcast updated
+        if self.db.add_user_to_public_channel(user_id, payload.pubkey, self.server_private_key, self.server_public_key):
+            await self._broadcast_public_channel_updated_and_key_share()
 
         # when a new user connects, we first advertise their identity to all other servers/peers and the introducer
         # then we send the existing roster to the new user (both local and remote users) to ensure the new user learns about earlier users' pubkeys'
@@ -451,7 +463,8 @@ class Server(BaseServer):
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
-                content_sig=payload.content_sig
+                content_sig=payload.content_sig,
+                channel="dm"
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
             req = create_body(MsgType.USER_DELIVER, self.server_id, target, deliver_pl, sig, ts=msg.ts)
@@ -480,6 +493,10 @@ class Server(BaseServer):
 
     async def _handle_msg_public(self, msg: ProtocolMessage):
         payload = MsgPublicChannelPayload(**msg.payload)
+        key = f"pub_{msg.ts}_{msg.from_}_{hash(json.dumps(msg.payload, sort_keys=True))}"
+        if key in self.seen_ids:
+            return
+        self.seen_ids.add(key)
 
         # broadcast to local users
         for uid, ws in list(self.local_users.items()):
@@ -487,7 +504,8 @@ class Server(BaseServer):
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
-                content_sig=payload.content_sig
+                content_sig=payload.content_sig,
+                channel="public"
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
             req = create_body(MsgType.USER_DELIVER, self.server_id, uid, deliver_pl, sig, ts=msg.ts)
@@ -498,18 +516,13 @@ class Server(BaseServer):
             except Exception as e:
                 self.logger.error(f"[PUB] local deliver to {uid} failed: {e!r}")
 
-        # forward to other servers (fan-out)
+        # fan-out to other servers
         for sid, p in self.peers.items():
-            fwd_pl = ServerDeliverPayload(
-                user_id="public",
-                ciphertext=payload.ciphertext,
-                sender=msg.from_,
-                sender_pub=payload.sender_pub,
-                content_sig=payload.content_sig
-            ).model_dump()
-            sig = compute_transport_sig(load_private_key(self.server_private_key), fwd_pl)
-            req = create_body(MsgType.SERVER_DELIVER, self.server_id, sid, fwd_pl, sig, ts=msg.ts)
-            await p.ws.send(req)
+            req = create_body(MsgType.MSG_PUBLIC_CHANNEL, msg.from_, "*", payload.model_dump(), ts=msg.ts)
+            try:
+                await p.ws.send(req)
+            except Exception as e:
+                self.logger.error(f"[PUB] fan-out to {sid} failed: {e!r}")
 
     async def _handle_command(self, websocket: ServerConnection, data: ProtocolMessage):
         payload = CommandPayload(**data.payload)
@@ -574,6 +587,113 @@ class Server(BaseServer):
             await self._gossip_user_remove(user_id)
 
         self.logger.info(f"[CLEANUP] user {user_id} removed ({reason})")
+
+    async def _broadcast_public_channel_updated_and_key_share(self):
+        group = self.db.get_group("public")
+        if not group:
+            return
+        members = self.db.get_group_members("public")
+        if not members:
+            return
+
+        version = group['version']
+        wraps = [{"member_id": uid, "wrapped_key": info['wrapped_key']} for uid, info in members.items()]
+
+        # Broadcast UPDATED
+        updated_pl = PublicChannelUpdatedPayload(version=version, wraps=wraps).model_dump()
+        sig_updated = compute_transport_sig(load_private_key(self.server_private_key), updated_pl)
+        req_updated = create_body(MsgType.PUBLIC_CHANNEL_UPDATED, self.server_id, "*", updated_pl, sig_updated, ts=current_timestamp())
+
+        # to local users
+        for uid, ws in list(self.local_users.items()):
+            try:
+                await ws.send(req_updated)
+            except Exception as e:
+                self.logger.error(f"[PUB-UPDATED] failed to {uid}: {e!r}")
+
+        # to peers
+        for sid, p in self.peers.items():
+            try:
+                await p.ws.send(req_updated)
+            except Exception as e:
+                self.logger.error(f"[PUB-UPDATED] failed to server {sid}: {e!r}")
+
+        # to introducer
+        if self.introducer_ws:
+            try:
+                await self.introducer_ws.send(req_updated)
+            except Exception as e:
+                self.logger.error(f"[PUB-UPDATED] failed to introducer: {e!r}")
+
+        # Broadcast KEY_SHARE
+        shares = [{"member": uid, "wrapped_public_channel_key": info['wrapped_key']} for uid, info in members.items()]
+        content_sig = compute_key_share_sig(load_private_key(self.server_private_key), shares, self.server_public_key)
+        key_share_pl = PublicChannelKeySharePayload(shares=shares, creator_pub=self.server_public_key, content_sig=content_sig).model_dump()
+        sig_ks = compute_transport_sig(load_private_key(self.server_private_key), key_share_pl)
+        req_key_share = create_body(MsgType.PUBLIC_CHANNEL_KEY_SHARE, self.server_id, "*", key_share_pl, sig_ks, ts=current_timestamp())
+
+        # Send to all same places
+        for uid, ws in list(self.local_users.items()):
+            try:
+                await ws.send(req_key_share)
+            except Exception as e:
+                self.logger.error(f"[PUB-KEY-SHARE] failed to {uid}: {e!r}")
+
+        for sid, p in self.peers.items():
+            try:
+                await p.ws.send(req_key_share)
+            except Exception as e:
+                self.logger.error(f"[PUB-KEY-SHARE] failed to server {sid}: {e!r}")
+
+        if self.introducer_ws:
+            try:
+                await self.introducer_ws.send(req_key_share)
+            except Exception as e:
+                self.logger.error(f"[PUB-KEY-SHARE] failed to introducer: {e!r}")
+
+    async def _forward_public_channel_updated(self, data: ProtocolMessage):
+        req = create_body(data.type, data.from_, "*", data.payload, ts=data.ts)
+        # Send to local clients
+        for uid, ws in list(self.local_users.items()):
+            try:
+                await ws.send(req)
+            except Exception as e:
+                self.logger.error(f"[FORWARD-PUB-UPDATED] to {uid} failed: {e!r}")
+        # Send to peers (avoid echo)
+        for sid, p in self.peers.items():
+            if sid != data.from_:
+                try:
+                    await p.ws.send(req)
+                except Exception as e:
+                    self.logger.error(f"[FORWARD-PUB-UPDATED] to server {sid} failed: {e!r}")
+        # Send to introducer
+        if self.introducer_ws and data.from_ != "introducer":  # assuming introducer id not known
+            try:
+                await self.introducer_ws.send(req)
+            except Exception as e:
+                self.logger.error(f"[FORWARD-PUB-UPDATED] to introducer failed: {e!r}")
+
+    async def _forward_public_channel_key_share(self, data: ProtocolMessage):
+        req = create_body(data.type, data.from_, "*", data.payload, ts=data.ts)
+        # Send to local clients
+        for uid, ws in list(self.local_users.items()):
+            try:
+                await ws.send(req)
+            except Exception as e:
+                self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to {uid} failed: {e!r}")
+        # Send to peers (avoid echo)
+        for sid, p in self.peers.items():
+            if sid != data.from_:
+                try:
+                    await p.ws.send(req)
+                except Exception as e:
+                    self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to server {sid} failed: {e!r}")
+        # Send to introducer
+        if self.introducer_ws and data.from_ != "introducer":
+            try:
+                await self.introducer_ws.send(req)
+            except Exception as e:
+                self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to introducer failed: {e!r}")
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):

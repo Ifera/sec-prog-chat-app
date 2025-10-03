@@ -13,7 +13,7 @@ from common import create_body
 from config import config
 from crypto import (
     generate_rsa_keypair, load_private_key, load_public_key,
-    rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig
+    rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig, aes_encrypt, aes_decrypt
 )
 from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
     MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload
@@ -30,6 +30,7 @@ class Client:
         self.public_key_b64: Optional[str] = None
         self.websocket: Optional[Union[ClientConnection, ServerConnection]] = None
         self.known_pubkeys: Dict[str, str] = {}  # user_id -> pubkey
+        self.group_keys: Dict[str, bytes] = {}  # "public" -> AES key
         self._listen_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = max(1, reconnect_attempts)
 
@@ -97,6 +98,10 @@ class Client:
                 await self._handle_user_advertise(msg)
             case MsgType.USER_REMOVE:
                 await self._handle_user_remove(msg)
+            case MsgType.PUBLIC_CHANNEL_KEY_SHARE:
+                await self._handle_public_key_share(msg)
+            case MsgType.PUBLIC_CHANNEL_UPDATED:
+                await self._handle_public_updated(msg)
             case MsgType.ERROR:
                 logger.error("ERROR: %s", msg.payload)
             case _:
@@ -106,32 +111,37 @@ class Client:
         payload = UserDeliverPayload(**data.payload)
         try:
             ciphertext = payload.ciphertext
-            sender_id = payload.sender  # set by server on fanout
+            sender_id = payload.sender
             sender_pub = payload.sender_pub
-            sender_pub_key = load_public_key(sender_pub)
 
-            # Try to verify against the *sender id*, not the server id.
-            # NOTE: The original timestamp used by the sender to sign may not be present,
-            # so verification can fail in some deployments; keep it best-effort.
-            try:
-                ok = verify_content_sig(
-                    sender_pub_key,
-                    ciphertext,
-                    sender_id,
-                    data.to,
-                    data.ts,
-                    payload.content_sig,
-                )
-                if not ok:
-                    logger.debug("content_sig failed verification (best-effort)")
-            except Exception:
-                logger.debug("content_sig verify raised; continuing", exc_info=True)
-
-            plaintext = rsa_decrypt(load_private_key(self.private_key_b64), ciphertext)
-            msg_txt = plaintext.decode("utf-8", errors="replace")
-            print(f"[DM] {sender_id}: {msg_txt}")
+            if payload.channel == "dm":
+                sender_pub_key = load_public_key(sender_pub)
+                # Verification best-effort
+                try:
+                    ok = verify_content_sig(
+                        sender_pub_key,
+                        ciphertext,
+                        sender_id,
+                        data.to,
+                        data.ts,
+                        payload.content_sig,
+                    )
+                    if not ok:
+                        logger.debug("content_sig failed verification (best-effort)")
+                except Exception:
+                    logger.debug("content_sig verify raised")
+                plaintext = rsa_decrypt(load_private_key(self.private_key_b64), ciphertext)
+                print(f"[DM] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
+            elif payload.channel == "public":
+                if "public" not in self.group_keys:
+                    logger.error("No group key for public, message discarded")
+                    return
+                plaintext = aes_decrypt(self.group_keys["public"], ciphertext)
+                print(f"[PUB] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
+            else:
+                logger.error("Unknown channel: %s", payload.channel)
         except Exception as e:
-            logger.exception(f"failed to decrypt/verify: {e!r}")
+            logger.exception(f"decryption failed: {e!r}")
 
     async def _handle_command_response(self, data: ProtocolMessage):
         payload = CommandResponsePayload(**data.payload)
@@ -160,6 +170,24 @@ class Client:
         except Exception as e:
             logger.error(f"Bad USER_REMOVE payload: {e!r}")
 
+    async def _handle_public_updated(self, data: ProtocolMessage):
+        # Optional: handle group version updates if needed
+        pass
+
+    async def _handle_public_key_share(self, data: ProtocolMessage):
+        from models import PublicChannelKeySharePayload
+        payload = PublicChannelKeySharePayload(**data.payload)
+        for share in payload.shares:
+            if share['member'] == self.user_id:
+                wrapped = share['wrapped_public_channel_key']
+                try:
+                    group_key = rsa_decrypt(load_private_key(self.private_key_b64), wrapped)
+                    self.group_keys["public"] = group_key
+                    logger.info("Received group key for public channel")
+                except Exception as e:
+                    logger.error(f"Failed to decrypt public channel key: {e!r}")
+                break
+
     async def send_command(self, line: str):
         if not self.websocket:
             logger.error("not connected")
@@ -187,8 +215,10 @@ class Client:
 
         if cmd == "/all" and len(parts) >= 2:
             msg_text = " ".join(parts[1:])
-            # TODO: fix: public is signed but not encrypted (spec may allow RSA group key)
-            ciphertext = msg_text
+            if "public" not in self.group_keys:
+                logger.error("No group key for public channel")
+                return
+            ciphertext = aes_encrypt(self.group_keys['public'], msg_text.encode("utf-8"))
             ts = current_timestamp()
             content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, ts)
             pub_pl = MsgPublicChannelPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
