@@ -175,7 +175,6 @@ class Client:
             logger.error(f"Bad USER_REMOVE payload: {e!r}")
 
     async def _handle_public_updated(self, data: ProtocolMessage):
-        # Optional: handle group version updates if needed
         pass
 
     async def _handle_public_key_share(self, data: ProtocolMessage):
