@@ -2,6 +2,8 @@ import json
 import sqlite3
 from typing import Optional, Dict, Any
 
+from crypto import load_public_key, rsa_encrypt, rsa_decrypt, load_private_key, generate_aes_key
+
 
 class Database:
     def __init__(self, db_path: str = "chat.db"):
@@ -173,18 +175,38 @@ class Database:
         if user_id in members:
             return False  # already member
 
-        # get fixed group_key
-        from crypto import get_fixed_group_key
-        group_key = get_fixed_group_key()
+        # Determine the current key: if existing members, decrypt from one; else generate new
+        if members:
+            # Pick the first existing member to decrypt the key
+            existing_uid, info = next(iter(members.items()))
+            existing_user = self.get_user(existing_uid)
+            if not existing_user:
+                return False
+            try:
+                current_key = rsa_decrypt(load_private_key(existing_user['pubkey']), info['wrapped_key'])
+                # No need to set_group_key if already set, but to ensure
+                self.set_group_key("public", current_key, server_public_key_b64)
+            except:
+                # Perhaps corrupt, regenerate
+                current_key = generate_aes_key()
+                self.set_group_key("public", current_key, server_public_key_b64)
+        else:
+            # No existing members, generate new random key
+            current_key = generate_aes_key()
+            self.set_group_key("public", current_key, server_public_key_b64)
 
-        # wrap group_key with user's pub
-        from crypto import load_public_key, rsa_encrypt
-        user_pub = load_public_key(pubkey)
-        wrapped_key = rsa_encrypt(user_pub, group_key)
+        # Bump version
+        new_version = group['version'] + 1
+        self.update_group_version("public", new_version)
 
-        # add member
-        self.add_group_member("public", user_id, "member", wrapped_key)
+        # Wrap the current key for ALL members (existing + new)
+        all_user_ids = list(members.keys()) + [user_id]
+        for uid in all_user_ids:
+            user_rec = self.get_user(uid)
+            if not user_rec:
+                continue  # skip if no user rec, but should not happen
+            member_pub = load_public_key(user_rec['pubkey'])
+            wrapped_key = rsa_encrypt(member_pub, current_key)
+            self.add_group_member("public", uid, "member", wrapped_key)
 
-        # bump version (since membership change)
-        self.update_group_version("public", group['version'] + 1)
         return True

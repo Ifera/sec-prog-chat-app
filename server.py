@@ -330,6 +330,7 @@ class Server(BaseServer):
                 case MsgType.COMMAND:
                     await self._handle_command(websocket, data)
                 case MsgType.PUBLIC_CHANNEL_UPDATED:
+                    await self._handle_public_channel_updated(data)
                     await self._forward_public_channel_updated(data)
                 case MsgType.PUBLIC_CHANNEL_KEY_SHARE:
                     await self._forward_public_channel_key_share(data)
@@ -680,6 +681,18 @@ class Server(BaseServer):
                     await p.ws.send(req)
                 except Exception as e:
                     self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to server {sid} failed: {e!r}")
+
+    async def _handle_public_channel_updated(self, data: ProtocolMessage):
+        if data.from_ == self.server_id:
+            return  # skip self
+
+        payload = PublicChannelUpdatedPayload(**data.payload)
+        group = self.db.get_group("public")
+        if group and payload.version > group['version']:
+            self.db.update_group_version("public", payload.version)
+            for wrap in payload.wraps:
+                self.db.add_group_member("public", wrap['member_id'], "member", wrap['wrapped_key'])
+                # Optionally, if server knows the pub, decrypt to get key, but for now, rely on shares
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):

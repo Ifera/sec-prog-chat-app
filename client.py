@@ -135,8 +135,8 @@ class Client:
                     if verify_public_content_sig(load_public_key(sender_pub), ciphertext, sender_id, data.ts, payload.content_sig):
                         print(f"[PUB] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
                         return
-                except Exception:
-                    pass  # Not a public message
+                except Exception as e:
+                    logger.error(f"Failed to decrypt public message: {e!r}")
 
             logger.error("Unable to decrypt message: neither DM nor public")
         except Exception as e:

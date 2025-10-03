@@ -1,5 +1,4 @@
 import base64
-import hashlib
 import json
 import os
 from typing import Tuple
@@ -8,7 +7,6 @@ from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from cryptography.hazmat.primitives import padding as sym_padding
 
 
 def base64url_encode(data: bytes) -> str:
@@ -147,7 +145,3 @@ def compute_key_share_sig(private_key: rsa.RSAPrivateKey, shares: list, creator_
     canonical_shares = json.dumps(shares, sort_keys=True, separators=(',', ':'))
     data = canonical_shares + creator_pub
     return rsa_sign(private_key, data.encode('utf-8'))
-
-
-def get_fixed_group_key() -> bytes:
-    return hashlib.sha256(b"public_channel_fixed_key_v1").digest()[:32]
