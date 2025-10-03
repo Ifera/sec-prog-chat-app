@@ -13,7 +13,7 @@ from common import create_body
 from config import config
 from crypto import (
     generate_rsa_keypair, load_private_key, load_public_key,
-    rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig, aes_encrypt, aes_decrypt
+    rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig, aes_encrypt, aes_decrypt, verify_public_content_sig
 )
 from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
     MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload
@@ -114,34 +114,33 @@ class Client:
             sender_id = payload.sender
             sender_pub = payload.sender_pub
 
-            if payload.channel == "dm":
-                sender_pub_key = load_public_key(sender_pub)
-                # Verification best-effort
-                try:
-                    ok = verify_content_sig(
-                        sender_pub_key,
-                        ciphertext,
-                        sender_id,
-                        data.to,
-                        data.ts,
-                        payload.content_sig,
-                    )
-                    if not ok:
-                        logger.debug("content_sig failed verification (best-effort)")
-                except Exception:
-                    logger.debug("content_sig verify raised")
+            # Try to decrypt as DM first
+            try:
                 plaintext = rsa_decrypt(load_private_key(self.private_key_b64), ciphertext)
-                print(f"[DM] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
-            elif payload.channel == "public":
-                if "public" not in self.group_keys:
-                    logger.error("No group key for public, message discarded")
+                # Verify sig for DM
+                if verify_content_sig(load_public_key(sender_pub), ciphertext, sender_id, data.to, data.ts, payload.content_sig):
+                    print(f"[DM] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
                     return
-                plaintext = aes_decrypt(self.group_keys["public"], ciphertext)
-                print(f"[PUB] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
+            except Exception:
+                pass  # Not a DM
+
+            # Try to decrypt as public message
+            if "public" not in self.group_keys:
+                logger.error("No group key for public, message discarded")
+                return
             else:
-                logger.error("Unknown channel: %s", payload.channel)
+                try:
+                    plaintext = aes_decrypt(self.group_keys["public"], ciphertext)
+                    # Verify sig for public
+                    if verify_public_content_sig(load_public_key(sender_pub), ciphertext, sender_id, data.ts, payload.content_sig):
+                        print(f"[PUB] {sender_id}: {plaintext.decode('utf-8', errors='replace')}")
+                        return
+                except Exception:
+                    pass  # Not a public message
+
+            logger.error("Unable to decrypt message: neither DM nor public")
         except Exception as e:
-            logger.exception(f"decryption failed: {e!r}")
+            logger.exception(f"message processing failed: {e!r}")
 
     async def _handle_command_response(self, data: ProtocolMessage):
         payload = CommandResponsePayload(**data.payload)

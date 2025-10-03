@@ -250,14 +250,12 @@ class Server(BaseServer):
                 return
             self.seen_ids.add(key)
 
-            channel = "dm" if payload.user_id != "public" else "public"
             if payload.user_id in self.local_users:
                 deliver_pl = UserDeliverPayload(
                     ciphertext=payload.ciphertext,
                     sender=payload.sender,
                     sender_pub=payload.sender_pub,
-                    content_sig=payload.content_sig,
-                    channel=channel
+                    content_sig=payload.content_sig
                 ).model_dump()
                 sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
                 req = create_body(MsgType.USER_DELIVER, self.server_id, payload.user_id, deliver_pl, sig, ts=data.ts)
@@ -465,8 +463,7 @@ class Server(BaseServer):
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
-                content_sig=payload.content_sig,
-                channel="dm"
+                content_sig=payload.content_sig
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
             req = create_body(MsgType.USER_DELIVER, self.server_id, target, deliver_pl, sig, ts=msg.ts)
@@ -506,8 +503,7 @@ class Server(BaseServer):
                 ciphertext=payload.ciphertext,
                 sender=msg.from_,
                 sender_pub=payload.sender_pub,
-                content_sig=payload.content_sig,
-                channel="public"
+                content_sig=payload.content_sig
             ).model_dump()
             sig = compute_transport_sig(load_private_key(self.server_private_key), deliver_pl)
             req = create_body(MsgType.USER_DELIVER, self.server_id, uid, deliver_pl, sig, ts=msg.ts)
