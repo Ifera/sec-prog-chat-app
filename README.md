@@ -222,7 +222,7 @@ Client commands are the same as Windows.
 - Client (client.py)
   - Generates an ephemeral RSA-4096 keypair on startup
   - Sends USER_HELLO to the server; learns other users’ pubkeys via USER_ADVERTISE messages
-  - /tell uses RSA OAEP to encrypt to the recipient public key and signs the content; /all signs plaintext for the public channel
+  - /tell uses RSA OAEP to encrypt to the recipient public key and signs the content
 
 - Base Infrastructure (base_server.py)
   - Common WebSocket server lifecycle, graceful shutdown, and a heartbeat/health monitor between servers
