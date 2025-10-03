@@ -761,14 +761,16 @@ class Server(BaseServer):
     async def _handle_file_start(self, data: ProtocolMessage):
         try:
             payload = FileStartPayload(**data.payload)
-            key = f"file_start_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
-            if key in self.seen_ids:
-                return
-            self.seen_ids.add(key)
+            _key = f"file_start_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
 
             if payload.mode == "public":
                 # broadcast to local users
                 for uid, ws in list(self.local_users.items()):
+                    key = f"{_key}_{uid}"
+                    if key in self.seen_ids:
+                        continue
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, data.to, payload.model_dump(), ts=data.ts)
                     try:
                         await ws.send(req)
@@ -777,6 +779,11 @@ class Server(BaseServer):
 
                 # fan-out to other servers
                 for sid, p in self.peers.items():
+                    key = f"{_key}_{sid}"
+                    if key in self.seen_ids:
+                        continue
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, "*", payload.model_dump(), ts=data.ts)
                     try:
                         await p.ws.send(req)
@@ -785,6 +792,12 @@ class Server(BaseServer):
             else:
                 # treat like DM
                 target = data.to
+
+                key = f"{_key}_{target}"
+                if key in self.seen_ids:
+                    return
+                self.seen_ids.add(key)
+
                 if target in self.local_users:
                     req = create_body(data.type, data.from_, target, payload.model_dump(), ts=data.ts)
                     try:
@@ -806,16 +819,18 @@ class Server(BaseServer):
     async def _handle_file_chunk(self, data: ProtocolMessage):
         try:
             payload = FileChunkPayload(**data.payload)
-            key = f"file_chunk_{payload.file_id}_{payload.index}_{hash(json.dumps(data.payload, sort_keys=True))}"
-            if key in self.seen_ids:
-                return
-            self.seen_ids.add(key)
+            _key = f"file_chunk_{payload.file_id}_{payload.index}_{hash(json.dumps(data.payload, sort_keys=True))}"
 
             # Reconstruct target from start, but since to is the same as start
             to = data.to
             if to == "*" or to == "public":
                 # fan-out like public
                 for uid, ws in list(self.local_users.items()):
+                    key = f"{_key}_{uid}"
+                    if key in self.seen_ids:
+                        continue
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, uid, payload.model_dump(), ts=data.ts)
                     try:
                         await ws.send(req)
@@ -823,6 +838,11 @@ class Server(BaseServer):
                         self.logger.error(f"[FILE-CHUNK] to {uid} failed: {e!r}")
 
                 for sid, p in self.peers.items():
+                    key = f"{_key}_{sid}"
+                    if key in self.seen_ids:
+                        continue
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, "*", payload.model_dump(), ts=data.ts)
                     try:
                         await p.ws.send(req)
@@ -831,6 +851,11 @@ class Server(BaseServer):
             else:
                 # route like DM
                 if to in self.local_users:
+                    key = f"{_key}_{to}"
+                    if key in self.seen_ids:
+                        return
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, to, payload.model_dump(), ts=data.ts)
                     try:
                         await self.local_users[to].send(req)
@@ -851,14 +876,16 @@ class Server(BaseServer):
     async def _handle_file_end(self, data: ProtocolMessage):
         try:
             payload = FileEndPayload(**data.payload)
-            key = f"file_end_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
-            if key in self.seen_ids:
-                return
-            self.seen_ids.add(key)
+            _key = f"file_end_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
 
             to = data.to
             if to == "*" or to == "public":
                 for uid, ws in list(self.local_users.items()):
+                    key = f"{_key}_{uid}"
+                    if key in self.seen_ids:
+                        continue
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, uid, payload.model_dump(), ts=data.ts)
                     try:
                         await ws.send(req)
@@ -866,6 +893,11 @@ class Server(BaseServer):
                         self.logger.error(f"[FILE-END] to {uid} failed: {e!r}")
 
                 for sid, p in self.peers.items():
+                    key = f"{_key}_{sid}"
+                    if key in self.seen_ids:
+                        continue
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, "*", payload.model_dump(), ts=data.ts)
                     try:
                         await p.ws.send(req)
@@ -873,6 +905,11 @@ class Server(BaseServer):
                         self.logger.error(f"[FILE-END] to {sid} failed: {e!r}")
             else:
                 if to in self.local_users:
+                    key = f"{_key}_{to}"
+                    if key in self.seen_ids:
+                        return
+                    self.seen_ids.add(key)
+
                     req = create_body(data.type, data.from_, to, payload.model_dump(), ts=data.ts)
                     try:
                         await self.local_users[to].send(req)
