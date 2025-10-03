@@ -25,7 +25,8 @@ from models import (
     MsgPublicChannelPayload, ErrorPayload,
     UserDeliverPayload, CommandPayload,
     ServerType, CommandResponsePayload,
-    PublicChannelUpdatedPayload, PublicChannelKeySharePayload, current_timestamp
+    PublicChannelUpdatedPayload, PublicChannelKeySharePayload,
+    FileStartPayload, FileChunkPayload, FileEndPayload, current_timestamp
 )
 
 
@@ -341,6 +342,12 @@ class Server(BaseServer):
                 case MsgType.PUBLIC_CHANNEL_KEY_SHARE:
                     await self._handle_public_channel_key_share(data)
                     await self._forward_public_channel_key_share(data)
+                case MsgType.FILE_START:
+                    await self._handle_file_start(data)
+                case MsgType.FILE_CHUNK:
+                    await self._handle_file_chunk(data)
+                case MsgType.FILE_END:
+                    await self._handle_file_end(data)
                 case _:
                     self.logger.error(f"[USER] Unknown request type: {req_type}")
         except (ConnectionClosedOK, ConnectionClosedError):
@@ -750,6 +757,138 @@ class Server(BaseServer):
                 self.logger.error(f"[SYNC-PUB] Failed to send to {sid}: {e!r}")
         else:
             self.logger.warning(f"[SYNC-PUB] No peer found for {sid}")
+
+    async def _handle_file_start(self, data: ProtocolMessage):
+        try:
+            payload = FileStartPayload(**data.payload)
+            key = f"file_start_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
+            if key in self.seen_ids:
+                return
+            self.seen_ids.add(key)
+
+            if payload.mode == "public":
+                # broadcast to local users
+                for uid, ws in list(self.local_users.items()):
+                    req = create_body(data.type, data.from_, data.to, payload.model_dump(), ts=data.ts)
+                    try:
+                        await ws.send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-START] to {uid} failed: {e!r}")
+
+                # fan-out to other servers
+                for sid, p in self.peers.items():
+                    req = create_body(data.type, data.from_, "*", payload.model_dump(), ts=data.ts)
+                    try:
+                        await p.ws.send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-START] to {sid} failed: {e!r}")
+            else:
+                # treat like DM
+                target = data.to
+                if target in self.local_users:
+                    req = create_body(data.type, data.from_, target, payload.model_dump(), ts=data.ts)
+                    try:
+                        await self.local_users[target].send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-START] to {target} failed: {e!r}")
+                    return
+
+                sid = self.user_locations.get(target)
+                if sid and sid != "local" and sid in self.peers:
+                    req = create_body(data.type, data.from_, target, payload.model_dump(), ts=data.ts)
+                    await self.peers[sid].ws.send(req)
+                    return
+
+                self.logger.warning(f"[FILE-START] {ErrorCode.USER_NOT_FOUND}: {target} not registered")
+        except Exception as e:
+            self.logger.error(f"[FILE-START] failed: {e!r}")
+
+    async def _handle_file_chunk(self, data: ProtocolMessage):
+        try:
+            payload = FileChunkPayload(**data.payload)
+            key = f"file_chunk_{payload.file_id}_{payload.index}_{hash(json.dumps(data.payload, sort_keys=True))}"
+            if key in self.seen_ids:
+                return
+            self.seen_ids.add(key)
+
+            # Reconstruct target from start, but since to is the same as start
+            to = data.to
+            if to == "*" or to == "public":
+                # fan-out like public
+                for uid, ws in list(self.local_users.items()):
+                    req = create_body(data.type, data.from_, uid, payload.model_dump(), ts=data.ts)
+                    try:
+                        await ws.send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-CHUNK] to {uid} failed: {e!r}")
+
+                for sid, p in self.peers.items():
+                    req = create_body(data.type, data.from_, "*", payload.model_dump(), ts=data.ts)
+                    try:
+                        await p.ws.send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-CHUNK] to {sid} failed: {e!r}")
+            else:
+                # route like DM
+                if to in self.local_users:
+                    req = create_body(data.type, data.from_, to, payload.model_dump(), ts=data.ts)
+                    try:
+                        await self.local_users[to].send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-CHUNK] to {to} failed: {e!r}")
+                    return
+
+                sid = self.user_locations.get(to)
+                if sid and sid != "local" and sid in self.peers:
+                    req = create_body(data.type, data.from_, to, payload.model_dump(), ts=data.ts)
+                    await self.peers[sid].ws.send(req)
+                    return
+
+                self.logger.warning(f"[FILE-CHUNK] no route to {to}")
+        except Exception as e:
+            self.logger.error(f"[FILE-CHUNK] failed: {e!r}")
+
+    async def _handle_file_end(self, data: ProtocolMessage):
+        try:
+            payload = FileEndPayload(**data.payload)
+            key = f"file_end_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
+            if key in self.seen_ids:
+                return
+            self.seen_ids.add(key)
+
+            to = data.to
+            if to == "*" or to == "public":
+                for uid, ws in list(self.local_users.items()):
+                    req = create_body(data.type, data.from_, uid, payload.model_dump(), ts=data.ts)
+                    try:
+                        await ws.send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-END] to {uid} failed: {e!r}")
+
+                for sid, p in self.peers.items():
+                    req = create_body(data.type, data.from_, "*", payload.model_dump(), ts=data.ts)
+                    try:
+                        await p.ws.send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-END] to {sid} failed: {e!r}")
+            else:
+                if to in self.local_users:
+                    req = create_body(data.type, data.from_, to, payload.model_dump(), ts=data.ts)
+                    try:
+                        await self.local_users[to].send(req)
+                    except Exception as e:
+                        self.logger.error(f"[FILE-END] to {to} failed: {e!r}")
+                    return
+
+                sid = self.user_locations.get(to)
+                if sid and sid != "local" and sid in self.peers:
+                    req = create_body(data.type, data.from_, to, payload.model_dump(), ts=data.ts)
+                    await self.peers[sid].ws.send(req)
+                    return
+
+                self.logger.warning(f"[FILE-END] no route to {to}")
+        except Exception as e:
+            self.logger.error(f"[FILE-END] failed: {e!r}")
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):

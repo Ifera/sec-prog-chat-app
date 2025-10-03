@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -16,7 +17,8 @@ from crypto import (
     rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig, aes_encrypt, aes_decrypt, verify_public_content_sig
 )
 from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
-    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload
+    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload, \
+    FileStartPayload, FileChunkPayload, FileEndPayload
 
 logging.basicConfig(level=config.logging_level, format=config.logging_format)
 logger = logging.getLogger("Client")
@@ -31,12 +33,16 @@ class Client:
         self.websocket: Optional[Union[ClientConnection, ServerConnection]] = None
         self.known_pubkeys: Dict[str, str] = {}  # user_id -> pubkey
         self.group_keys: Dict[str, bytes] = {}  # "public" -> AES key
+        self.file_transfers: Dict[str, Dict] = {}  # file_id -> {'name': str, 'chunks': Dict[int, bytes], 'size': int, 'sha256': str, 'mode': str}
+        self.received_dir: str | None = None
         self._listen_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = max(1, reconnect_attempts)
 
     def init_user(self, user_id: Optional[str] = None):
         self.user_id = user_id or generate_uuid()
         self.private_key_b64, self.public_key_b64 = generate_rsa_keypair()
+        self.received_dir = os.path.join(os.getcwd(), "received", user_id)
+        os.makedirs(self.received_dir, exist_ok=True)
         logger.info(f"user_id={self.user_id}")
 
     async def connect(self):
@@ -102,6 +108,12 @@ class Client:
                 await self._handle_public_key_share(msg)
             case MsgType.PUBLIC_CHANNEL_UPDATED:
                 await self._handle_public_updated(msg)
+            case MsgType.FILE_START:
+                await self._handle_file_start(msg)
+            case MsgType.FILE_CHUNK:
+                await self._handle_file_chunk(msg)
+            case MsgType.FILE_END:
+                await self._handle_file_end(msg)
             case MsgType.ERROR:
                 logger.error("ERROR: %s", msg.payload)
             case _:
@@ -190,6 +202,64 @@ class Client:
                     logger.error(f"Failed to decrypt public channel key: {e!r}")
                 break
 
+    async def _handle_file_start(self, msg):
+        payload = FileStartPayload(**msg.payload)
+        file_id = payload.file_id
+        self.file_transfers[file_id] = {
+            'name': payload.name,
+            'chunks': {},
+            'size': payload.size,
+            'sha256': payload.sha256,
+            'mode': payload.mode
+        }
+        logger.info(f"Receiving file: {payload.name} ({payload.size} bytes)")
+
+    async def _handle_file_chunk(self, msg):
+        payload = FileChunkPayload(**msg.payload)
+        file_id = payload.file_id
+        transfer = self.file_transfers.get(file_id)
+        if not transfer:
+            return
+        index = payload.index
+        ciphertext = payload.ciphertext
+        try:
+            if transfer['mode'] == "public":
+                plaintext = aes_decrypt(self.group_keys["public"], ciphertext)
+            else:
+                plaintext = rsa_decrypt(load_private_key(self.private_key_b64), ciphertext)
+            transfer['chunks'][index] = plaintext
+        except Exception as e:
+            logger.error(f"Failed to decrypt chunk {index} for {file_id}: {e!r}")
+
+    async def _handle_file_end(self, msg):
+        payload = FileEndPayload(**msg.payload)
+        file_id = payload.file_id
+        transfer = self.file_transfers.pop(file_id, None)
+        if not transfer:
+            return
+        chunks = transfer['chunks']
+        expected_sha = transfer['sha256']
+        expected_size = transfer['size']
+        # sort by index
+        keys = sorted(chunks.keys())
+        data = b''.join(chunks[i] for i in keys)
+        if len(data) != expected_size:
+            logger.error(f"File {transfer['name']} size mismatch: got {len(data)}, expected {expected_size}")
+            return
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if actual_sha != expected_sha:
+            logger.error(f"File {transfer['name']} hash mismatch")
+            return
+        # save
+        safe_name = os.path.basename(transfer['name'])
+        file_path = os.path.join(self.received_dir, safe_name)
+        try:
+            with open(file_path, 'wb') as f:
+                f.write(data)
+            logger.info(f"File saved: {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save file {file_path}: {e!r}")
+
     async def send_command(self, line: str):
         if not self.websocket:
             logger.error("not connected")
@@ -234,7 +304,59 @@ class Client:
             await self.websocket.send(body)
             return
 
+        if cmd == "/file" and len(parts) >= 3:
+            mode = parts[1]
+            if mode == "dm" and len(parts) >= 4:
+                target = parts[2]
+                file_path = " ".join(parts[3:])
+                await self._send_file(mode, target, file_path)
+            elif mode == "public" and len(parts) >= 3:
+                file_path = " ".join(parts[2:])
+                await self._send_file(mode, "public", file_path)
+            else:
+                logger.error("Invalid /file command. Use /file dm <user> <path> or /file public <path>")
+            return
+
         logger.error("Unknown command: %s", cmd)
+
+    async def _send_file(self, mode, to, path):
+        if not os.path.isfile(path):
+            logger.error("File not found: %s", path)
+            return
+        file_id = generate_uuid()
+        name = os.path.basename(path)
+        with open(path, "rb") as f:
+            data = f.read()
+        size = len(data)
+        sha256 = hashlib.sha256(data).hexdigest()
+        # send FILE_START
+        start_pl = FileStartPayload(file_id=file_id, name=name, size=size, sha256=sha256, mode=mode).model_dump()
+        body = create_body(MsgType.FILE_START, self.user_id, to, start_pl)
+        await self.websocket.send(body)
+        # chunk data
+        chunk_size = 400
+        chunks = [data[i:i + chunk_size] for i in range(0, len(data), chunk_size)]
+        for index, chunk in enumerate(chunks):
+            if mode == "public":
+                ciphertext = aes_encrypt(self.group_keys['public'], chunk)
+                content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, current_timestamp())
+            else:
+                if to not in self.known_pubkeys:
+                    logger.error("Unknown user: %s", to)
+                    return
+                target_pk = load_public_key(self.known_pubkeys[to])
+                ciphertext = rsa_encrypt(target_pk, chunk)
+                ts = current_timestamp()
+                content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, to, ts)
+            chunk_pl = FileChunkPayload(file_id=file_id, index=index, ciphertext=ciphertext).model_dump()
+            ts = current_timestamp()
+            body = create_body(MsgType.FILE_CHUNK, self.user_id, to, chunk_pl, ts=ts)
+            await self.websocket.send(body)
+        # send FILE_END
+        end_pl = FileEndPayload(file_id=file_id).model_dump()
+        body = create_body(MsgType.FILE_END, self.user_id, to, end_pl)
+        await self.websocket.send(body)
+        logger.info("File sent: %s", path)
 
     async def close(self):
         """Close the socket and cancel listener."""
@@ -284,6 +406,8 @@ async def interactive_client():
     print("- /list")
     print("- /tell <user> <msg>")
     print("- /all <msg>")
+    print("- /file dm <user> <file path>")
+    print("- /file public <file path>")
     print("- /quit")
 
     loop = asyncio.get_running_loop()

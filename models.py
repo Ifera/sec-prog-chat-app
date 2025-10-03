@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field
 
 class MsgType(StrEnum):
     # Server <-> Server
+    FILE_START = "FILE_START"
+    FILE_CHUNK = "FILE_CHUNK"
+    FILE_END = "FILE_END"
     SERVER_HELLO_JOIN = "SERVER_HELLO_JOIN"
     SERVER_WELCOME = "SERVER_WELCOME"
     SERVER_ANNOUNCE = "SERVER_ANNOUNCE"
@@ -179,6 +182,24 @@ class UserDeliverPayload(BaseModel):
 class CommandResponsePayload(BaseModel):
     command: str
     response: str
+
+
+class FileStartPayload(BaseModel):
+    file_id: str
+    name: str
+    size: int
+    sha256: str
+    mode: str
+
+
+class FileChunkPayload(BaseModel):
+    file_id: str
+    index: int
+    ciphertext: str
+
+
+class FileEndPayload(BaseModel):
+    file_id: str
 
 
 def generate_uuid() -> str:
