@@ -594,6 +594,7 @@ class Server(BaseServer):
         group = self.db.get_group("public")
         if not group:
             return
+
         members = self.db.get_group_members("public")
         if not members:
             return
@@ -609,23 +610,18 @@ class Server(BaseServer):
         # to local users
         for uid, ws in list(self.local_users.items()):
             try:
+                self.logger.info(f"[PUB-UPDATED] sending to user: {uid}")
                 await ws.send(req_updated)
             except Exception as e:
-                self.logger.error(f"[PUB-UPDATED] failed to {uid}: {e!r}")
+                self.logger.error(f"[PUB-UPDATED] failed to user: {uid}: {e!r}")
 
         # to peers
         for sid, p in self.peers.items():
             try:
+                self.logger.info(f"[PUB-UPDATED] sending to server {sid}")
                 await p.ws.send(req_updated)
             except Exception as e:
                 self.logger.error(f"[PUB-UPDATED] failed to server {sid}: {e!r}")
-
-        # to introducer
-        if self.introducer_ws:
-            try:
-                await self.introducer_ws.send(req_updated)
-            except Exception as e:
-                self.logger.error(f"[PUB-UPDATED] failed to introducer: {e!r}")
 
         # Broadcast KEY_SHARE
         shares = [{"member": uid, "wrapped_public_channel_key": info['wrapped_key']} for uid, info in members.items()]
@@ -637,65 +633,57 @@ class Server(BaseServer):
         # Send to all same places
         for uid, ws in list(self.local_users.items()):
             try:
+                self.logger.info(f"[PUB-KEY-SHARE] sending to user: {uid}")
                 await ws.send(req_key_share)
             except Exception as e:
-                self.logger.error(f"[PUB-KEY-SHARE] failed to {uid}: {e!r}")
+                self.logger.error(f"[PUB-KEY-SHARE] failed to user: {uid}: {e!r}")
 
         for sid, p in self.peers.items():
             try:
+                self.logger.info(f"[PUB-KEY-SHARE] sending to server {sid}")
                 await p.ws.send(req_key_share)
             except Exception as e:
                 self.logger.error(f"[PUB-KEY-SHARE] failed to server {sid}: {e!r}")
 
-        if self.introducer_ws:
-            try:
-                await self.introducer_ws.send(req_key_share)
-            except Exception as e:
-                self.logger.error(f"[PUB-KEY-SHARE] failed to introducer: {e!r}")
-
     async def _forward_public_channel_updated(self, data: ProtocolMessage):
         req = create_body(data.type, data.from_, "*", data.payload, ts=data.ts)
+
         # Send to local clients
         for uid, ws in list(self.local_users.items()):
             try:
+                self.logger.info(f"[FORWARD-PUB-UPDATED] to user: {uid}")
                 await ws.send(req)
             except Exception as e:
                 self.logger.error(f"[FORWARD-PUB-UPDATED] to {uid} failed: {e!r}")
+
         # Send to peers (avoid echo)
         for sid, p in self.peers.items():
             if sid != data.from_:
                 try:
+                    self.logger.info(f"[FORWARD-PUB-UPDATED] to server: {sid}")
                     await p.ws.send(req)
                 except Exception as e:
                     self.logger.error(f"[FORWARD-PUB-UPDATED] to server {sid} failed: {e!r}")
-        # Send to introducer
-        if self.introducer_ws and data.from_ != "introducer":  # assuming introducer id not known
-            try:
-                await self.introducer_ws.send(req)
-            except Exception as e:
-                self.logger.error(f"[FORWARD-PUB-UPDATED] to introducer failed: {e!r}")
 
     async def _forward_public_channel_key_share(self, data: ProtocolMessage):
         req = create_body(data.type, data.from_, "*", data.payload, ts=data.ts)
+
         # Send to local clients
         for uid, ws in list(self.local_users.items()):
             try:
+                self.logger.info(f"[FORWARD-PUB-KEY-SHARE] to user: {uid}")
                 await ws.send(req)
             except Exception as e:
                 self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to {uid} failed: {e!r}")
+
         # Send to peers (avoid echo)
         for sid, p in self.peers.items():
             if sid != data.from_:
                 try:
+                    self.logger.info(f"[FORWARD-PUB-KEY-SHARE] to server: {sid}")
                     await p.ws.send(req)
                 except Exception as e:
                     self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to server {sid} failed: {e!r}")
-        # Send to introducer
-        if self.introducer_ws and data.from_ != "introducer":
-            try:
-                await self.introducer_ws.send(req)
-            except Exception as e:
-                self.logger.error(f"[FORWARD-PUB-KEY-SHARE] to introducer failed: {e!r}")
 
     # ---------- utilities ----------
     async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):

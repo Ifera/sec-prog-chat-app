@@ -47,8 +47,7 @@ class Introducer(BaseServer):
             case MsgType.USER_REMOVE:
                 await self._handle_user_remove(websocket, data)
             case _:
-                self.logger.error(f"[INCOMING] unknown request type: {req_type}")
-                await websocket.close()
+                self.logger.error(f"[INCOMING] unknown request type: {req_type}. Skipping...")
 
     async def _handle_server_join(self, websocket: ServerConnection, data: ProtocolMessage):
         try:
