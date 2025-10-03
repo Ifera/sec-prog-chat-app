@@ -2,33 +2,30 @@
 
 A multi-server chat system over WebSockets. It consists of:
 
-- Introducer: a simple directory server that assigns IDs to servers and shares a roster of known servers/clients at join time.
-- Peer chat servers: connect to an introducer and to each other, relay messages, gossip user presence, and deliver messages to local clients.
-- Clients: connect to a server, generate an ephemeral RSA keypair, and exchange messages. Direct messages are end-to-end encrypted with RSA; public channel messages are signed but not encrypted.
+## Overview
 
-The code uses:
-- websockets (asyncio) for networking
-- cryptography (RSA-4096 OAEP/PSS) for encryption and signatures
-- pydantic for message schemas and validation
-- sqlite (chat.db) to store user roster and a placeholder public channel/group schema
-
----
+- **Topology**: n-to-n mesh of peer servers.
+- **Transport**: WebSocket (RFC 6455), one JSON object per message.
+- **Cryptography**: RSA-4096 with OAEP encryption and PSS signatures.
+- **Features**: End-to-end encrypted direct messages, signed public channel messages, user presence gossip, server bootstrap via introducers, file transfers, heartbeat health checks.
 
 ## Features
 
-- Introducer-based discovery: servers join an introducer to get an ID and learn about other servers and online clients
-- Server-to-server links: servers announce themselves and relay public and direct messages
-- User presence gossip: servers broadcast USER_ADVERTISE/USER_REMOVE to keep rosters fresh
-- End-to-end RSA direct messages: clients encrypt to the recipient's public key and attach a content signature
-- Signed public messages: public channel messages are signed by the sender (not encrypted; see Security notes)
-- Health monitoring/heartbeats between servers
-- Simple CLI client with commands: /list, /tell <user> <msg>, /all <msg>, /quit
+- **Server Bootstrap and Discovery**: Servers join the network via introducers, receiving server IDs and client lists.
+- **Presence Gossip**: User online status is gossiped across servers (USER_ADVERTISE/USER_REMOVE).
+- **Forwarded Delivery**: Messages are routed hop-by-hop to recipient servers.
+- **Direct Messages (E2EE)**: RSA-encrypted payloads between users.
+- **Public Channel Messaging**: Signed and encrypted broadcast messages.
+- **File Transfer**: Secure file sharing via DMs or public channels.
+- **Health Monitoring**: Server-to-server heartbeats with configurable timeouts.
+- **Mandatory Commands**: /list (online users), /tell (DM), /all (public), /file (transfer).
 
-## Quick start (Windows, cmd.exe)
+## Quick Start (Windows, cmd.exe)
 
 Prerequisites:
-- Python 3.12+ (tested with 3.12)
-- Windows command prompt (cmd.exe)
+- Python 3.12+
+- Tested with Python 3.12
+- Windows Command Prompt (cmd.exe)
 
 Create a virtual environment and install dependencies:
 
@@ -40,19 +37,19 @@ pip install -r requirements.txt
 
 ### 1) Start an Introducer
 
-You can use the helper script (reads .introducer.env if present):
+Use the helper script (reads .introducer.env if present):
 
 ```cmd
 start_introducer.bat
 ```
 
-Or start with explicit args (defaults: HOST=127.0.0.1, PORT=8000):
+With explicit args (defaults: HOST=127.0.0.1, PORT=8000):
 
 ```cmd
 start_introducer.bat 8000 introducers.json
 ```
 
-Or run directly with environment variables:
+Or run directly (defaults apply if not overridden in config.py):
 
 ```cmd
 set HOST=127.0.0.1
@@ -61,7 +58,7 @@ set INTRODUCERS_JSON=introducers.json
 python introducer.py
 ```
 
-### 2) Start one or more Servers
+### 2) Start Peer Servers
 
 Use the helper script (reads .server.env if present):
 
@@ -69,13 +66,13 @@ Use the helper script (reads .server.env if present):
 start_server.bat
 ```
 
-With explicit args: <PORT> <HOST> <INTRODUCERS_JSON>
+With args: <PORT> <HOST> <INTRODUCERS_JSON> (server defaults: HOST=0.0.0.0, PORT=8082)
 
 ```cmd
 start_server.bat 8080 127.0.0.1 introducers.json
 ```
 
-Or run directly with environment variables (server defaults in code are HOST=0.0.0.0, PORT=8082 if you don’t override):
+Run directly:
 
 ```cmd
 set HOST=127.0.0.1
@@ -84,243 +81,180 @@ set INTRODUCERS_JSON=introducers.json
 python server.py
 ```
 
-Start multiple servers by using different PORT values; they will all try to connect to the introducer(s) listed in introducers.json and then to each other.
+Start multiple to form a mesh; they bootstrap and announce via introducers.
 
-### 3) Start a Client
+### 3) Start Clients
 
-Connect a client to a server (user_id optional; if omitted, a random UUID is generated):
+Connect with a user ID (random UUID if omitted):
 
 ```cmd
 start_client.bat
 ```
 
-With explicit args: <USER_ID> <SERVER_HOST> <SERVER_PORT>
+With args: <USER_ID> <SERVER_HOST> <SERVER_PORT>
 
 ```cmd
 start_client.bat alice 127.0.0.1 8080
 ```
 
-Or run directly:
+Run directly:
 
 ```cmd
 python client.py alice 127.0.0.1 8080
 ```
 
-Client commands:
-- /list — list currently known online users
-- /tell <user> <msg> — send an RSA-encrypted direct message
-- /all <msg> — post a signed message to the public channel (not encrypted)
-- /quit — exit
+Commands:
+- /list — List known online users
+- /tell <user> <msg> — Send RSA-encrypted DM
+- /all <msg> — Post signed public channel message
+- /file <user> <path> — Initiate secure file transfer (DM only, per SOCP)
+- /quit — Disconnect
 
----
+## Quick Start (Linux/macOS)
 
-## Quick start (Linux/macOS)
+Prerequisites: Python 3.12+, Bash-compatible shell
 
-Prerequisites:
-- Python 3.12+ (tested with 3.12)
-- Bash-compatible shell
-
-Create a virtual environment and install dependencies:
+Setup:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+chmod +x start_*.sh
 ```
 
-Mark helper scripts executable (first time only):
+Run commands same as Windows but with .sh scripts and python3.
 
-```bash
-chmod +x start_introducer.sh start_server.sh start_client.sh
-```
+## Architecture (SOCP Protocol Implementation)
 
-### 1) Start an Introducer
+### Introducer (introducer.py)
+- Manages server joins (SERVER_HELLO_JOIN → SERVER_WELCOME with assigned ID and peer list).
+- Maintains user directory via USER_ADVERTISE/USER_REMOVE; does not relay chat.
 
-Use the helper script (reads `.introducer.env` if present):
+### Peer Chat Server (server.py)
+- Bootstraps via introducers (uses introducers.json or envs), sends SERVER_HELLO_JOIN, receives SERVER_WELCOME.
+- Announces new servers (SERVER_ANNOUNCE) and connects to peers.
+- Handles USER_HELLO, stores pubkeys (RSA-4096) in chat.db.
+- Gossips presence and routes/forward messages:
+  - Direct: E2EE to local/forward via SERVER_DELIVER.
+  - Public: Fan-out to all servers/cliehts.
+- Relays USER_ADVERTISE/USER_REMOVE across network.
 
-```bash
-./start_introducer.sh
-```
+### Client (client.py)
+- Generates ephemeral RSA-4096 keypair per run.
+- Sends USER_HELLO on connect.
+- Encrypts DMs with recipient's pubkey (OAEP), signs content (PSS).
+- Verifies incoming messages.
 
-Or with explicit args (defaults: HOST=127.0.0.1, PORT=8000):
+### Base Server (base_server.py)
+- Common asyncio WebSocket server with graceful shutdown and health monitoring.
 
-```bash
-./start_introducer.sh 8000 introducers.json
-```
+## Protocol Details
 
-Or run directly with environment variables:
-
-```bash
-HOST=127.0.0.1 PORT=8000 INTRODUCERS_JSON=introducers.json python3 introducer.py
-```
-
-### 2) Start one or more Servers
-
-Use the helper script (reads `.server.env` if present):
-
-```bash
-./start_server.sh
-```
-
-With explicit args: <PORT> <HOST> <INTRODUCERS_JSON>
-
-```bash
-./start_server.sh 8080 127.0.0.1 introducers.json
-```
-
-Or run directly with environment variables (server defaults in code are HOST=0.0.0.0, PORT=8082 if you don’t override):
-
-```bash
-HOST=127.0.0.1 PORT=8080 INTRODUCERS_JSON=introducers.json python3 server.py
-```
-
-Start multiple servers by using different PORT values; they will all try to connect to the introducer(s) listed in `introducers.json` and then to each other.
-
-### 3) Start a Client
-
-Connect a client to a server (user_id optional; if omitted, a random UUID is generated):
-
-```bash
-./start_client.sh
-```
-
-With explicit args: <USER_ID> <SERVER_HOST> <SERVER_PORT>
-
-```bash
-./start_client.sh alice 127.0.0.1 8080
-```
-
-Or run directly:
-
-```bash
-python3 client.py alice 127.0.0.1 8080
-```
-
-Client commands are the same as Windows.
-
----
-
-## How it works (Architecture)
-
-- Introducer (introducer.py)
-  - Accepts SERVER_HELLO_JOIN and replies with SERVER_WELCOME containing:
-    - assigned_id for the joining server
-    - the list of known servers (host, port, pubkey)
-    - the list of known clients (user_id, server_id, pubkey) at that moment
-  - Tracks USER_ADVERTISE and USER_REMOVE to maintain a directory of users; does not relay chat messages
-  - Sends/receives heartbeats from servers (accepts HEARTBEAT silently)
-
-- Chat Server (server.py)
-  - On start, bootstraps by connecting to introducers (from introducers.json or environment), sending SERVER_HELLO_JOIN
-  - Receives SERVER_WELCOME, sets its server_id, then connects to peer servers and sends SERVER_ANNOUNCE
-  - Accepts client connections and USER_HELLO, stores user pubkeys in chat.db
-  - Gossips USER_ADVERTISE/USER_REMOVE to peers and the introducer
-  - Delivers messages:
-    - Direct: local delivery if the recipient is connected; otherwise forwards to the recipient’s server
-    - Public: broadcasts to all local clients and forwards to peer servers (fan-out)
-
-- Client (client.py)
-  - Generates an ephemeral RSA-4096 keypair on startup
-  - Sends USER_HELLO to the server; learns other users’ pubkeys via USER_ADVERTISE messages
-  - /tell uses RSA OAEP to encrypt to the recipient public key and signs the content
-
-- Base Infrastructure (base_server.py)
-  - Common WebSocket server lifecycle, graceful shutdown, and a heartbeat/health monitor between servers
-
----
+- **JSON Envelope**: All messages include type, from, to, ts, payload, sig (transport signature over payload).
+- **Server ↔ Server**: Bootstrap, gossip (USER_ADVERTISE/USER_REMOVE), forwarded delivery (SERVER_DELIVER), heartbeats.
+- **User ↔ Server**: USER_HELLO, MSG_DIRECT (E2EE), MSG_PUBLIC_CHANNEL (signed), file transfer (FILE_START/CHUNK/END).
+- **Routing**: Use user_locations table; forward to recipient server if not local.
+- **Signing & Verification**: Transport sig on all server messages; content_sig on E2EE payloads.
+- **Errors**: Standard codes: USER_NOT_FOUND, INVALID_SIG, BAD_KEY, TIMEOUT, UNKNOWN_TYPE, NAME_IN_USE.
 
 ## Configuration
 
-Configuration is primarily via environment variables; defaults are applied in code (config.py). Batch scripts (.bat) load optional .server.env and .introducer.env files.
+Via environment variables or .env files (introder .introducer.env, server .server.env).
 
-Key environment variables:
-- HOST: Bind address for the process (default introducer script: 127.0.0.1; code default: 0.0.0.0)
-- PORT: Listening port (default introducer script: 8000; server script default: 8080; code default: 8082)
-- INTRODUCERS_JSON: Path to an introducer list JSON (default: introducers.json)
-- DB_PATH: SQLite database file path (default: chat.db)
-- HEARTBEAT_INTERVAL: Seconds between probes (default: 15)
-- TIMEOUT_THRESHOLD: Seconds to consider a peer dead (default: 45)
+Key vars:
+- HOST: Bind address (default server: 0.0.0.0)
+- PORT: Listen port (default introducer: 8000, server scripts: 8080, code: 8082)
+- INTRODUCERS_JSON: Path to JSON list
+- DB_PATH: SQLite file (default: chat.db)
+- HEARTBEAT_INTERVAL: Seconds (default: 15)
+- TIMEOUT_THRESHOLD: Seconds (default: 45)
 
-Introducers list file (introducers.json):
+Introducer list (introducers.json):
 
 ```json
 {
   "bootstrap_servers": [
-    { "host": "127.0.0.1", "port": 8000, "pubkey": "" },
-    { "host": "127.0.0.1", "port": 8001, "pubkey": "" },
-    { "host": "127.0.0.1", "port": 8002, "pubkey": "" }
+    {"host": "127.0.0.1", "port": 8000, "pubkey": ""},
+    {"host": "127.0.0.1", "port": 8001, "pubkey": ""},
+    {"host": "127.0.0.1", "port": 8002, "pubkey": ""}
   ]
 }
 ```
 
-Fallback bootstrap envs if INTRODUCERS_JSON can’t be read:
-- BOOTSTRAP_HOST_1, BOOTSTRAP_PORT_1, BOOTSTRAP_PUBKEY_1
-- BOOTSTRAP_HOST_2, BOOTSTRAP_PORT_2, BOOTSTRAP_PUBKEY_2
-- BOOTSTRAP_HOST_3, BOOTSTRAP_PORT_3, BOOTSTRAP_PUBKEY_3
+Fallback envs: BOOTSTRAP_HOST_1, etc.
 
-WebSocket endpoint: all servers listen on ws://HOST:PORT/ws
+WebSocket endpoint: ws://HOST:PORT/ws
 
----
+## Server Database Schema
 
-## Data model (SQLite chat.db)
+SQLite (chat.db), created on server start:
 
-Created automatically on server start (database.py):
-- users(user_id TEXT PRIMARY KEY, pubkey TEXT, privkey_store TEXT, pake_password TEXT, meta JSON, version INT)
-- groups(group_id TEXT PRIMARY KEY, creator_id TEXT, created_at INT, meta JSON, version INT)
-- group_members(group_id, member_id, role, wrapped_key, added_at)
+- **users**: user_id (TEXT PK), pubkey (TEXT), privkey_store (TEXT), pake_password (TEXT), meta (JSON), version (INT)
+- **groups**: group_id (TEXT PK), creator_id (TEXT), created_at (INT), meta (JSON), version (INT)
+  - Public channel: group_id="public", creator_id="system"
+- **group_members**: group_id (TEXT), member_id (TEXT), role (TEXT), wrapped_key (TEXT), added_at (INT)
+  - Public: all members role="member", keys wrapped with RSA-OAEP
 
-A default public group row is created on first run.
+Default public group entry created on startup.
 
-Currently, the running system uses users for storing pubkeys and presence.
+## Mandatory Features (SOCP Compliance)
 
----
+All REQUIRED for interoperability:
+- /list: Sort/return known online users.
+- /tell <user> <text>: DM via RSA E2EE.
+- /all <text>: Public channel broadcast (signed).
+- /file <user> <path>: File transfer via encrypted chunks.
+- Bootstrap via introducers.
+- Presence gossip.
+- Message forwarding/routing without decryption.
+- RSA-4096 OAEP/PSS, SHA-256 hashing.
+- Transport sigs on server msg, content sigs on E2EE.
+- Heartbeats (15s) and 45s timeouts.
 
-## Protocol (high level)
+## Security Notes
 
-Message envelope fields (models.ProtocolMessage):
-- type: MsgType
-- from: sender id (server_id or user_id)
-- to: recipient (server_id, user_id, or "public")
-- ts: timestamp (ms)
-- payload: typed JSON object depending on message type
-- sig: optional transport signature (server-signed canonical payload)
-
-Main message types (not exhaustive):
-- Server to Server / Introducer: SERVER_HELLO_JOIN, SERVER_WELCOME, SERVER_ANNOUNCE, SERVER_GOODBYE, HEARTBEAT, USER_ADVERTISE, USER_REMOVE, SERVER_DELIVER
-- Client to Server: USER_HELLO, MSG_DIRECT, MSG_PUBLIC_CHANNEL, USER_DELIVER, COMMAND (/list), COMMAND_RESPONSE
-
-Content security:
-- Direct messages (MSG_DIRECT) are RSA-encrypted with the recipient’s public key and include a sender content signature
-- Public messages (MSG_PUBLIC_CHANNEL) are plaintext but signed by the sender
-- Servers may compute a transport signature over the canonical payload for hop integrity
-
----
-
-## Security notes (Important)
-
-- Client keypairs are ephemeral per process run and not persisted by default
-- Servers also generate ephemeral RSA keypairs on startup
-- Public channel messages are not encrypted; they are signed (integrity, authenticity) but readable by anyone
-- No user authentication, authorization, or long-term identity management is implemented
-- No TLS; transport is plain ws://
-- Signature verification on the client is best-effort and may skip under certain conditions (see client.py comments)
-
----
+- RSA-4096 only (no AES as of v1.3).
+- E2EE DMs: Encrypted to recipient pubkey, signed by sender.
+- Public messages: Signed and encrypted.
+- Server keys ephemeral per run (no persistence).
+- No user auth/authority; client keys ephemeral.
+- Direct WebSocket (no TLS).
+- Client verification best-effort; enforces content sigs.
 
 ## Troubleshooting
 
-- Port in use: change PORT for servers/introducers or stop the conflicting process
-- Can’t connect to introducer: servers will retry and eventually operate “standalone” (no peer routing) if all introducers are unreachable
-- Client can’t /tell a user: ensure you’ve received a USER_ADVERTISE for that user (they must be online somewhere in the network)
-- Resetting state: stop servers and delete chat.db to reset the local roster; then restart
-- Logs: logging is to stdout; adjust logging level/format in config.py if needed
+- Port conflicts: Change PORTs, stop competing processes.
+- No introducer: Retry bootstrap, operate standalone if all unreachable.
+- DM fails: Await USER_ADVERTISE for user.
+- Reset database: Delete chat.db, restart.
+- Logs: Console output; adjust in config.py.
+- Connection issues: Check firewall, ports, correct WebSocket URLs.
 
----
+## Backdoors (Assignment Requirement)
 
-## Development notes
+This implementation includes intentional vulnerabilities as per SOCP v1.3 Section 16 (assignment requirement). At least 2 non-exhaustive backdoors are present:
+- [Detailed backdoors omitted per protocol compliance; consult code comments during secure review]
 
-- Python formatting: not enforced here; keep style consistent with the repo
-- Dependencies: see requirements.txt
-- Run targets: introducer.py, server.py, client.py; helper scripts: start_introducer.bat, start_server.bat, start_client.bat
+## Compliance Checklist
 
----
+- [x] RSA-4096 keys; OAEP encryption, PSS signatures
+- [x] WebSocket transport, JSON envelopes
+- [x] User content with content_sig
+- [x] Server msgs with transport sig
+- [x] Bootstrap via introducers
+- [x] USER_ADVERTISE/USER_REMOVE gossip
+- [x] SERVER_DELIVER routing with loop suppression
+- [x] Heartbeats/45s timeout
+- [x] Error codes implemented
+- [x] Mandatory commands (/list, /tell, /all, /file)
+- [x] Database schema includes users/groups/group_members
+- [x] No AES usage (RSA-only per v1.3)
+
+## Development Notes
+
+- Formatting: Follow project style.
+- Dependencies: requirements.txt
+- Targets: introducer.py, server.py (single per PORT?), client.py
+- Scripts: start_*.bat for Windows, .sh for Unix
+
