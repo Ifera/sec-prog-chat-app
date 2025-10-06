@@ -26,6 +26,7 @@ Prerequisites:
 - Python 3.12+
 - Tested with Python 3.12
 - Windows Command Prompt (cmd.exe)
+- **Execute commands in `backend/` directory**
 
 Create a virtual environment and install dependencies:
 
