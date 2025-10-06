@@ -75,7 +75,7 @@ export function SocpProvider({ children }) {
   console.log({ messages });
 
   useEffect(() => {
-    const generatedUserId = crypto.randomUUID();
+    const generatedUserId = process.env.REACT_APP_USER_ID || crypto.randomUUID();
     setUserId(generatedUserId);
     generateRsaKeypair().then(({ private_key_b64, public_key_b64 }) => {
       setPrivateKeyB64(private_key_b64);
