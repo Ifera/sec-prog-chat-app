@@ -96,7 +96,7 @@ Connect with a user ID (random UUID if omitted):
 start_client.bat
 ```
 
-With args: <USER_ID> <SERVER_HOST> <SERVER_PORT>
+With args: <USER_ID[str|uuid]> <SERVER_HOST> <SERVER_PORT>
 
 ```cmd
 start_client.bat alice 127.0.0.1 8080
