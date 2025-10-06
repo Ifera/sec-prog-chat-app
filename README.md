@@ -8,6 +8,7 @@ A multi-server chat system over WebSockets. It consists of:
 - **Transport**: WebSocket (RFC 6455), one JSON object per message.
 - **Cryptography**: RSA-4096 with OAEP encryption and PSS signatures.
 - **Features**: End-to-end encrypted direct messages, signed public channel messages, user presence gossip, server bootstrap via introducers, file transfers, heartbeat health checks.
+- **Frontend**: Command-line client (Python) and web interface (React).
 
 ## Features
 
@@ -19,6 +20,9 @@ A multi-server chat system over WebSockets. It consists of:
 - **File Transfer**: Secure file sharing via DMs or public channels.
 - **Health Monitoring**: Server-to-server heartbeats with configurable timeouts.
 - **Mandatory Commands**: /list (online users), /tell (DM), /all (public), /file (transfer).
+- **Frontend**: Command-line client (Python) and web interface (React).
+
+# Backend
 
 ## Quick Start (Windows, cmd.exe)
 
@@ -126,7 +130,32 @@ chmod +x start_*.sh
 
 Run commands same as Windows but with .sh scripts and python3.
 
-## Architecture (SOCP Protocol Implementation)
+# Frontend
+
+## Requirements
+
+- Node.js: v18+ (recommended LTS)
+- npm
+- Modern browser with WebCrypto support
+- Backend server running locally
+
+## Install and Run
+
+- npm install
+- npm start
+- Open http://localhost:3000
+
+## HOW TO USE (DEMO STEPS)
+
+- Start the backend server (see backend section above).
+- Open two browser windows/tabs to http://localhost:3000.
+- Wait until footer shows: "SOCP WS: connected".
+- Select a user on the left to start a direct chat.
+- For Public channel: click "#public", type message, press Enter.
+- File transfer: click the paper-clip (Attach) → choose file → it sends as DM or to public depending on current conversation.
+- Download a received file: click "Download" link in the message bubble.
+
+# Architecture (SOCP Protocol Implementation)
 
 ### Introducer (introducer.py)
 - Manages server joins (SERVER_HELLO_JOIN → SERVER_WELCOME with assigned ID and peer list).
@@ -235,7 +264,6 @@ All REQUIRED for interoperability:
 ## Backdoors (Assignment Requirement)
 
 This implementation includes intentional vulnerabilities as per SOCP v1.3 Section 16 (assignment requirement). At least 2 non-exhaustive backdoors are present:
-- [Detailed backdoors omitted per protocol compliance; consult code comments during secure review]
 
 ## Compliance Checklist
 
@@ -250,7 +278,6 @@ This implementation includes intentional vulnerabilities as per SOCP v1.3 Sectio
 - [x] Error codes implemented
 - [x] Mandatory commands (/list, /tell, /all, /file)
 - [x] Database schema includes users/groups/group_members
-- [x] No AES usage (RSA-only per v1.3)
 
 ## Development Notes
 
