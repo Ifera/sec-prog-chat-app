@@ -5,6 +5,7 @@ import React, {
   useEffect,
   useMemo,
   useState,
+  useRef,
 } from 'react';
 import MESSAGE_TYPES from '../constants/messageTypes';
 import { ReadyState, useSocpConnection } from '../hooks/useSocpConnection';
@@ -25,6 +26,7 @@ export function SocpProvider({ children }) {
   const [onlineUsers, setOnlineUsers] = useState([]);
   const [messages, setMessages] = useState({});
   const [activePeerId, setActivePeerId] = useState(null);
+  const lastHandledRef = useRef(null);
 
   const { sendJsonMessage, lastJsonMessage, readyState, wsState } =
     useSocpConnection(serverUri, {
@@ -99,7 +101,9 @@ export function SocpProvider({ children }) {
   useEffect(() => {
     if (!lastJsonMessage) return;
     const messageType = lastJsonMessage.type;
-
+    
+    if (lastHandledRef.current === lastJsonMessage) return;
+    lastHandledRef.current = lastJsonMessage;
     switch (messageType) {
       case MESSAGE_TYPES.USER_DELIVER:
         onUserDeliver(lastJsonMessage).then(result => {
@@ -132,6 +136,8 @@ export function SocpProvider({ children }) {
         handleFileStart(lastJsonMessage);
         break;
       case MESSAGE_TYPES.FILE_CHUNK:
+        console.log("here");
+        
         handleFileChunk(lastJsonMessage);
         break;
       case MESSAGE_TYPES.FILE_END:

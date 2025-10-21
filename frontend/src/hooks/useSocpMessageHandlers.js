@@ -347,7 +347,7 @@ export const useSocpMessageHandlers = ({
 
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
-        const chunkSize = 64 * 1024;
+        const chunkSize = 400;
         const totalChunks = Math.ceil(u8.length / chunkSize);
 
         for (let i = 0; i < totalChunks; i++) {
