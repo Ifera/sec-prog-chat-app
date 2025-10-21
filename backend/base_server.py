@@ -68,8 +68,9 @@ class BaseServer:
                 ping_interval=self.ping_interval,
                 ping_timeout=self.ping_timeout,
                 logger=self.logger,
+                ssl=config.server_ssl_context(),
         ):
-            self.logger.info(f"[LISTEN] ws://{config.host}:{config.port}/ws")
+            self.logger.info(f"[LISTEN] wss://{config.host}:{config.port}/ws")
             try:
                 await self._stop_evt.wait()
             except asyncio.CancelledError:

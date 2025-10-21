@@ -51,6 +51,8 @@ fi
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8080}"
 INTRODUCERS_JSON="${INTRODUCERS_JSON:-introducers.json}"
+TLS_CERT="${TLS_CERT:../certs/dev_cert.pem}"
+TLS_KEY="${TLS_KEY:../certs/dev_key.pem}"
 
 # CLI args override
 if [[ "${1:-}" != "" ]]; then PORT="$1"; fi

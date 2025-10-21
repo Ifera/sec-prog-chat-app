@@ -26,7 +26,7 @@ logger = logging.getLogger("Client")
 
 class Client:
     def __init__(self, server_host: str, server_port: int, reconnect_attempts: int = 3):
-        self.server_uri = f"ws://{server_host}:{server_port}/ws"
+        self.server_uri = f"wss://{server_host}:{server_port}/ws"
         self.user_id: Optional[str] = None
         self.private_key_b64: Optional[str] = None
         self.public_key_b64: Optional[str] = None
@@ -54,7 +54,7 @@ class Client:
             try:
                 logger.info(f"connecting to {self.server_uri} (attempt {attempt}/{self._reconnect_attempts})")
                 # Small open timeout to fail fast if server isn’t listening.
-                self.websocket = await asyncio.wait_for(connect(self.server_uri, logger=logger), timeout=6)
+                self.websocket = await asyncio.wait_for(connect(self.server_uri, logger=logger, ssl=config.client_ssl_context()), timeout=6)
                 await self._send_user_hello()
                 logger.info("connected and sent USER_HELLO")
                 # Start background listener

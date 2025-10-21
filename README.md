@@ -60,6 +60,8 @@ Or run directly (defaults apply if not overridden in config.py):
 set HOST=127.0.0.1
 set PORT=8000
 set INTRODUCERS_JSON=introducers.json
+set TLS_CERT="../certs/dev_cert.pem"
+set TLS_KEY="../certs/dev_key.pem"
 python introducer.py
 ```
 
@@ -83,6 +85,8 @@ Run directly:
 set HOST=127.0.0.1
 set PORT=8080
 set INTRODUCERS_JSON=introducers.json
+set TLS_CERT="../certs/dev_cert.pem"
+set TLS_KEY="../certs/dev_key.pem"
 python server.py
 ```
 
@@ -214,7 +218,7 @@ Introducer list (introducers.json):
 
 Fallback envs: BOOTSTRAP_HOST_1, etc.
 
-WebSocket endpoint: ws://HOST:PORT/ws
+WebSocket endpoint: wss://HOST:PORT/ws
 
 ## Server Database Schema
 

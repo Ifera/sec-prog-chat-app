@@ -15,7 +15,7 @@ SERVER_PORT="${3:-${SERVER_PORT:-8080}}"
 
 export SERVER_HOST SERVER_PORT
 
-echo "Connecting client to ws://$SERVER_HOST:$SERVER_PORT/ws"
+echo "Connecting client to wss://$SERVER_HOST:$SERVER_PORT/ws"
 
 if command -v python3 >/dev/null 2>&1; then
   PY=python3

@@ -13,7 +13,7 @@ set SERVER_PORT=%3
 if "%SERVER_HOST%"=="" set SERVER_HOST=127.0.0.1
 if "%SERVER_PORT%"=="" set SERVER_PORT=8080
 
-echo Connecting client to ws://%SERVER_HOST%:%SERVER_PORT%/ws
+echo Connecting client to wss://%SERVER_HOST%:%SERVER_PORT%/ws
 if "%USER%"=="" (
     python client.py
 ) else (

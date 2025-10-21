@@ -78,9 +78,9 @@ class Server(BaseServer):
                 host, port = introducer.get("host"), introducer.get("port")
                 if not host or not port:
                     continue
-                uri = f"ws://{host}:{port}/ws"
+                uri = f"wss://{host}:{port}/ws"
                 try:
-                    async for ws in connect(uri, logger=self.logger):
+                    async for ws in connect(uri, logger=self.logger, ssl=config.client_ssl_context()):
                         # send SERVER_HELLO_JOIN to introducer
                         payload = ServerHelloJoinPayload(
                             host=config.host, port=config.port, pubkey=self.server_public_key
@@ -141,15 +141,15 @@ class Server(BaseServer):
 
             self.logger.info(f"[BOOTSTRAP] Retry in {backoff}s (attempt {attempt}/5)")
             await asyncio.sleep(backoff)
-            backoff *= 2
+            backoff = min(backoff * 2, 30)
 
         self.logger.warning("[BOOTSTRAP] All introducers unreachable; operating standalone for now.")
 
     async def _connect_to_server(self, sid: str, host: str, port: int, pubkey: Optional[str]):
-        uri = f"ws://{host}:{port}/ws"
+        uri = f"wss://{host}:{port}/ws"
         try:
             # connect to the remote server
-            ws: ClientConnection = await connect(uri, logger=self.logger)
+            ws: ClientConnection = await connect(uri, logger=self.logger, ssl=config.client_ssl_context())
             peer = Peer(sid=sid, ws=ws, host=host, port=port, pubkey=pubkey, outbound=True)
             self.peers[sid] = peer
             self.server_addrs[sid] = (host, port)
@@ -722,8 +722,8 @@ class Server(BaseServer):
                     self.db.set_group_key("public", group_key, self.server_public_key)
                     self.logger.info("Updated group key from key share")
                     return  # no need to try others
-                except:
-                    pass
+                except Exception as e:
+                    self.logger.error(f"Failed to decrypt public channel key share for {uid}: {e!r}")
 
     async def _send_public_channel_to_server(self, sid: str):
         group = self.db.get_group("public")

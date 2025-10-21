@@ -32,6 +32,8 @@ rem 2) Apply defaults if not defined by env file
 if not defined PORT set "PORT=8080"
 if not defined HOST set "HOST=127.0.0.1"
 if not defined INTRODUCERS_JSON set "INTRODUCERS_JSON=introducers.json"
+if not defined TLS_CERT set "TLS_CERT=../certs/dev_cert.pem"
+if not defined TLS_KEY set "TLS_KEY=../certs/dev_key.pem"
 
 rem 3) CLI args override env/defaults
 if not "%~1"=="" set "PORT=%~1"
