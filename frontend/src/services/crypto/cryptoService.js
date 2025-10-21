@@ -106,7 +106,6 @@ export async function generateRsaSignKeypair() {
 
 /* ---------------- Load keys from PEM base64url ---------------- */
 export function loadPrivateKey(privPemB64u) {
-  console.log({ privPemB64u });
   const pem = pemB64uToPemText(privPemB64u);
   // Accept PKCS8 or PKCS1
   try {
@@ -287,7 +286,3 @@ export function aesDecrypt(rawKey, ciphertextB64u) {
   return forge.util.decodeUtf8(pt);
 }
 
-/* ---------------- Misc ---------------- */
-export function currentTimestamp() {
-  return Date.now();
-}
