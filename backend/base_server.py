@@ -10,9 +10,10 @@ from websockets.exceptions import (
     ConnectionClosedOK,
 )
 
+from backend.models import current_timestamp
 from common import Peer, create_body
 from config import config
-from crypto import generate_rsa_keypair
+from crypto import generate_rsa_keypair, load_private_key, compute_transport_sig
 from models import (
     MsgType, HeartbeatPayload,
     generate_uuid, ServerType, ProtocolMessage
@@ -116,12 +117,11 @@ class BaseServer:
     async def _probe_peer(self, sid: str, peer: Peer) -> bool:
         try:
             hb_pl = HeartbeatPayload(server_type=self.server_type).model_dump()
-            req = create_body(MsgType.HEARTBEAT, self.server_id, sid, hb_pl)
+            req = self._signed_body(MsgType.HEARTBEAT, sid, hb_pl, ts=current_timestamp())
             await peer.ws.send(req)
             return True
         except Exception as e:
-            self.logger.error(f"[PROBE] failed to {sid} @ {peer.host}:{peer.port}")
-            self.logger.exception(e)
+            self.logger.debug(f"[PROBE] failed to {sid} @ {peer.host}:{peer.port} - {e!r}")
             return False
 
     async def _health_monitor(self):
@@ -134,7 +134,7 @@ class BaseServer:
 
             for sid, peer in peers_snapshot:
                 host, port = peer.host, peer.port
-                self.logger.info(f"[HEALTH] Sending heartbeat to {sid} @ {host}:{port}")
+                self.logger.debug(f"[HEALTH] Sending heartbeat to {sid} @ {host}:{port}")
 
                 try:
                     probe_ok = await self._probe_peer(sid, peer)
@@ -224,3 +224,7 @@ class BaseServer:
 
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
         pass
+
+    def _signed_body(self, mtype, to, payload_dict, ts) -> str:
+        sig = compute_transport_sig(load_private_key(self.server_private_key), payload_dict)
+        return create_body(mtype, self.server_id, to, payload_dict, sig, ts)

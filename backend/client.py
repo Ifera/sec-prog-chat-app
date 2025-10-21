@@ -10,11 +10,12 @@ from websockets.asyncio.client import connect, ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
 
+from backend.models import PublicChannelUpdatedPayload
 from common import create_body
 from config import config
 from crypto import (
-    generate_rsa_keypair, load_private_key, load_public_key,
-    rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig, compute_public_content_sig, aes_encrypt, aes_decrypt, verify_public_content_sig
+    generate_rsa_keypair, load_private_key, load_public_key, rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig,
+    compute_public_content_sig, aes_encrypt, aes_decrypt, verify_public_content_sig, compute_transport_sig
 )
 from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
     MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload, \
@@ -37,6 +38,10 @@ class Client:
         self.received_dir: str | None = None
         self._listen_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = max(1, reconnect_attempts)
+
+    def _signed_body(self, mtype, to, payload_dict, ts=None) -> str:
+        sig = compute_transport_sig(load_private_key(self.private_key_b64), payload_dict)
+        return create_body(mtype, self.user_id, to, payload_dict, sig, ts)
 
     def init_user(self, user_id: Optional[str] = None):
         self.user_id = user_id or generate_uuid()
@@ -71,7 +76,7 @@ class Client:
     async def _send_user_hello(self):
         assert self.websocket is not None, "websocket not connected"
         hello_pl = UserHelloPayload(client="local-cli-v1", pubkey=self.public_key_b64).model_dump()
-        body = create_body(MsgType.USER_HELLO, self.user_id, "server", hello_pl)
+        body = self._signed_body(MsgType.USER_HELLO, "server", hello_pl, current_timestamp())
         await self.websocket.send(body)
 
     async def listen(self):
@@ -186,7 +191,17 @@ class Client:
             logger.error(f"Bad USER_REMOVE payload: {e!r}")
 
     async def _handle_public_updated(self, data: ProtocolMessage):
-        pass
+        payload = PublicChannelUpdatedPayload(**data.payload)
+        for wrap in payload.wraps:
+            if wrap['member_id'] == self.user_id:
+                wrapped = wrap['wrapped_key']
+                try:
+                    group_key = rsa_decrypt(load_private_key(self.private_key_b64), wrapped)
+                    self.group_keys["public"] = group_key
+                    logger.info("Received group key for public channel via public channel update")
+                except Exception as e:
+                    logger.error(f"Failed to decrypt public channel key via public channel update: {e!r}")
+                break
 
     async def _handle_public_key_share(self, data: ProtocolMessage):
         from models import PublicChannelKeySharePayload
@@ -197,9 +212,9 @@ class Client:
                 try:
                     group_key = rsa_decrypt(load_private_key(self.private_key_b64), wrapped)
                     self.group_keys["public"] = group_key
-                    logger.info("Received group key for public channel")
+                    logger.info("Received group key for public channel via public channel key share")
                 except Exception as e:
-                    logger.error(f"Failed to decrypt public channel key: {e!r}")
+                    logger.error(f"Failed to decrypt public channel key via public channel key share: {e!r}")
                 break
 
     async def _handle_file_start(self, msg):
@@ -281,7 +296,7 @@ class Client:
             ts = current_timestamp()
             content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, target, ts)
             dm_pl = MsgDirectPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
-            body = create_body(MsgType.MSG_DIRECT, self.user_id, target, dm_pl, ts=ts)
+            body = self._signed_body(MsgType.MSG_DIRECT, target, dm_pl, ts=ts)
             await self.websocket.send(body)
             return
 
@@ -294,13 +309,13 @@ class Client:
             ts = current_timestamp()
             content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, ts)
             pub_pl = MsgPublicChannelPayload(ciphertext=ciphertext, sender_pub=self.public_key_b64, content_sig=content_sig).model_dump()
-            body = create_body(MsgType.MSG_PUBLIC_CHANNEL, self.user_id, "public", pub_pl, ts=ts)
+            body = self._signed_body(MsgType.MSG_PUBLIC_CHANNEL, "public", pub_pl, ts=ts)
             await self.websocket.send(body)
             return
 
         if cmd == "/list":
             comm_pl = CommandPayload(command="/list").model_dump()
-            body = create_body(MsgType.COMMAND, self.user_id, "server", comm_pl)
+            body = self._signed_body(MsgType.COMMAND, "server", comm_pl, current_timestamp())
             await self.websocket.send(body)
             return
 
@@ -331,7 +346,7 @@ class Client:
         sha256 = hashlib.sha256(data).hexdigest()
         # send FILE_START
         start_pl = FileStartPayload(file_id=file_id, name=name, size=size, sha256=sha256, mode=mode).model_dump()
-        body = create_body(MsgType.FILE_START, self.user_id, to, start_pl)
+        body = self._signed_body(MsgType.FILE_START, to, start_pl, ts=current_timestamp())
         await self.websocket.send(body)
         # chunk data
         chunk_size = 400
@@ -339,22 +354,18 @@ class Client:
         for index, chunk in enumerate(chunks):
             if mode == "public":
                 ciphertext = aes_encrypt(self.group_keys['public'], chunk)
-                content_sig = compute_public_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, current_timestamp())
             else:
                 if to not in self.known_pubkeys:
                     logger.error("Unknown user: %s", to)
                     return
                 target_pk = load_public_key(self.known_pubkeys[to])
                 ciphertext = rsa_encrypt(target_pk, chunk)
-                ts = current_timestamp()
-                content_sig = compute_content_sig(load_private_key(self.private_key_b64), ciphertext, self.user_id, to, ts)
             chunk_pl = FileChunkPayload(file_id=file_id, index=index, ciphertext=ciphertext).model_dump()
-            ts = current_timestamp()
-            body = create_body(MsgType.FILE_CHUNK, self.user_id, to, chunk_pl, ts=ts)
+            body = self._signed_body(MsgType.FILE_CHUNK, to, chunk_pl, ts=current_timestamp())
             await self.websocket.send(body)
         # send FILE_END
         end_pl = FileEndPayload(file_id=file_id).model_dump()
-        body = create_body(MsgType.FILE_END, self.user_id, to, end_pl)
+        body = self._signed_body(MsgType.FILE_END, to, end_pl, ts=current_timestamp())
         await self.websocket.send(body)
         logger.info("File sent: %s", path)
 
