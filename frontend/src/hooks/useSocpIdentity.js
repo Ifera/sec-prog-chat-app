@@ -7,8 +7,7 @@ export const useSocpIdentity = () => {
   const [publicKeyB64, setPublicKeyB64] = useState(null);
 
   useEffect(() => {
-    const generatedUserId = process.env.REACT_APP_USER_ID || crypto.randomUUID();
-    setUserId(generatedUserId);
+    // Generate keys once on mount
     generateRsaKeypair().then(({ private_key_b64, public_key_b64 }) => {
       setPrivateKeyB64(private_key_b64);
       setPublicKeyB64(public_key_b64);
@@ -17,6 +16,7 @@ export const useSocpIdentity = () => {
 
   return {
     userId,
+    setUserId,
     privateKeyB64,
     publicKeyB64,
   };
