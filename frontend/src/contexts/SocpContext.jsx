@@ -17,8 +17,9 @@ import { loadPrivateKey, computeTransportSig } from '../services/crypto/cryptoSe
 const SocpCtx = createContext(null);
 
 export function SocpProvider({ children }) {
-  const serverUri =
-    process.env.REACT_APP_BACKEND_WS_URL || 'wss://127.0.0.1:8080/ws';
+  const WS_PORT = process.env.REACT_APP_BACKEND_WS_PORT || '8080';
+  const WS_URL = `wss://${window.location.hostname}:${WS_PORT}/ws`;
+  const serverUri = process.env.REACT_APP_BACKEND_WS_URL || WS_URL;
 
   const { userId, privateKeyB64, publicKeyB64 } = useSocpIdentity();
 
