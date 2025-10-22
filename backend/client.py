@@ -128,7 +128,7 @@ class Client:
     async def _handle_error(self, msg: ProtocolMessage):
         payload = ErrorPayload(**msg.payload)
         match payload.code:
-            case ErrorCode.NAME_IN_USE:
+            case ErrorCode.NAME_IN_USE, ErrorCode.FILE_TOO_BIG:
                 logger.error(payload.detail)
             case _:
                 logger.error(f"Unknown error: {payload}")
@@ -352,6 +352,9 @@ class Client:
         with open(path, "rb") as f:
             data = f.read()
         size = len(data)
+        if size > config.MAX_FILE_SIZE:
+            logger.error("File too large: %s", path)
+            return
         sha256 = hashlib.sha256(data).hexdigest()
         # send FILE_START
         start_pl = FileStartPayload(file_id=file_id, name=name, size=size, sha256=sha256, mode=mode).model_dump()

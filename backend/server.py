@@ -380,7 +380,7 @@ class Server(BaseServer):
                 case MsgType.PUBLIC_CHANNEL_KEY_SHARE:
                     await self._handle_public_channel_key_share(data)
                 case MsgType.FILE_START:
-                    await self._handle_file_start(data)
+                    await self._handle_file_start(websocket, data)
                 case MsgType.FILE_CHUNK:
                     await self._handle_file_chunk(data)
                 case MsgType.FILE_END:
@@ -768,9 +768,14 @@ class Server(BaseServer):
         else:
             self.logger.warning(f"[SYNC-PUB] No peer found for {sid}")
 
-    async def _handle_file_start(self, data: ProtocolMessage):
+    async def _handle_file_start(self, websocket: ServerConnection, data: ProtocolMessage):
         try:
             payload = FileStartPayload(**data.payload)
+
+            if payload.size > config.max_file_size:
+                await self._error_to(websocket,  ErrorCode.FILE_TOO_BIG, "File size exceeds maximum allowed size.")
+                return
+
             _key = f"file_start_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
 
             if payload.mode == "public":

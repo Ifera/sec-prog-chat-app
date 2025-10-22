@@ -43,6 +43,7 @@ class ErrorCode(StrEnum):
     TIMEOUT = "TIMEOUT"
     UNKNOWN_TYPE = "UNKNOWN_TYPE"
     NAME_IN_USE = "NAME_IN_USE"
+    FILE_TOO_BIG = "FILE_TOO_BIG"
 
 
 class ProtocolMessage(BaseModel):

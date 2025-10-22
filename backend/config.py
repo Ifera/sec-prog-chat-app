@@ -25,6 +25,8 @@ class Config:
         self.heartbeat_interval: int = int(os.getenv("HEARTBEAT_INTERVAL", "15"))  # seconds
         self.timeout_threshold: int = int(os.getenv("TIMEOUT_THRESHOLD", "45"))  # seconds
 
+        self.max_file_size: int = int(os.getenv("MAX_FILE_SIZE", 1024 * 1024 * 2)) # 2 MB
+
         # Introducer JSON file (preferred)
         introducer_json_path = os.getenv("INTRODUCERS_JSON", "introducers.json")
         self.bootstrap_servers: List[Dict[str, Any]] = []
