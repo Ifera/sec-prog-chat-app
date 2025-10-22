@@ -248,6 +248,35 @@ export function verifyPublicContentSig(
   return rsaVerifyPss(pubKey, msg, sigB64u);
 }
 
+function sortForCanonical(value) {
+  if (Array.isArray(value)) {
+    return value.map(sortForCanonical);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.keys(value)
+      .sort()
+      .reduce((acc, key) => {
+        acc[key] = sortForCanonical(value[key]);
+        return acc;
+      }, {});
+  }
+
+  return value;
+}
+
+function canonicalizePayload(payload) {
+  if (payload === null || typeof payload !== 'object') {
+    return JSON.stringify(payload);
+  }
+  return JSON.stringify(sortForCanonical(payload));
+}
+
+export function computeTransportSig(privKey, payload) {
+  const canonical = canonicalizePayload(payload);
+  return rsaSignPss(privKey, canonical);
+}
+
 /* ---------------- AES-GCM (iv(12) | tag(16) | ciphertext) ---------------- */
 export function generateAesKey() {
   const bytes = forge.random.getBytesSync(32);

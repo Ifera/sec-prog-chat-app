@@ -4,7 +4,8 @@ import {
   aesEncrypt,
   computeContentSig,
   computePublicContentSig,
-  loadPrivateKey as loadPrivateKeyOAEP,
+  computeTransportSig,
+  loadPrivateKey,
   loadPublicKey as loadPublicKeyOAEP,
   rsaDecrypt,
   rsaEncrypt,
@@ -32,6 +33,41 @@ export const useSocpMessageHandlers = ({
   setFileTransfers,
   sendJsonMessage,
 }) => {
+  const createSignedEnvelope = useCallback(
+    (type, to, payload, ts, privKeyOverride = null) => {
+      if (!userId) {
+        console.error('[SOCP] Cannot create envelope without userId');
+        return null;
+      }
+
+      let signer = privKeyOverride;
+      if (!signer) {
+        if (!privateKeyB64) {
+          console.error('[SOCP] Missing private key for transport signature');
+          return null;
+        }
+        try {
+          signer = loadPrivateKey(privateKeyB64);
+        } catch (err) {
+          console.error(
+            '[SOCP] Failed to load private key for transport signature:',
+            err,
+          );
+          return null;
+        }
+      }
+
+      try {
+        const sig = computeTransportSig(signer, payload);
+        return createEnvelope(type, userId, to, payload, sig, ts);
+      } catch (err) {
+        console.error('[SOCP] Failed to compute transport signature:', err);
+        return null;
+      }
+    },
+    [privateKeyB64, userId],
+  );
+
   const onUserDeliver = useCallback(
     async msg => {
       try {
@@ -40,7 +76,7 @@ export const useSocpMessageHandlers = ({
           to,
           ts,
         } = msg;
-        const privKey = await loadPrivateKeyOAEP(privateKeyB64);
+        const privKey = await loadPrivateKey(privateKeyB64);
         const senderPub = await loadPublicKeyOAEP(senderPubB64);
 
         try {
@@ -133,7 +169,7 @@ export const useSocpMessageHandlers = ({
         if (!myShare || !myShare.wrapped_public_channel_key) return;
 
         try {
-          const privKey = await loadPrivateKeyOAEP(privateKeyB64);
+          const privKey = await loadPrivateKey(privateKeyB64);
           const groupKeyBuf = await rsaDecrypt(
             privKey,
             myShare.wrapped_public_channel_key,
@@ -150,6 +186,42 @@ export const useSocpMessageHandlers = ({
         }
       } catch (err) {
         console.error('[SOCP] Bad PUBLIC_CHANNEL_KEY_SHARE payload:', err);
+      }
+    },
+    [userId, privateKeyB64, setGroupKeys],
+  );
+
+  const onPublicChannelUpdated = useCallback(
+    async msg => {
+      try {
+        const payload = msg.payload || {};
+        const wraps = payload.wraps || [];
+        if (!privateKeyB64 || !Array.isArray(wraps) || wraps.length === 0)
+          return;
+
+        const myWrap = wraps.find(wrap => wrap.member_id === userId);
+        if (!myWrap || !myWrap.wrapped_key) return;
+
+        try {
+          const privKey = await loadPrivateKey(privateKeyB64);
+          const groupKeyBuf = await rsaDecrypt(privKey, myWrap.wrapped_key);
+
+          setGroupKeys(prev => ({
+            ...prev,
+            public: groupKeyBuf,
+          }));
+
+          console.info(
+            '[SOCP] Received group key for public channel via update',
+          );
+        } catch (e) {
+          console.error(
+            '[SOCP] Failed to decrypt public channel key via update:',
+            e,
+          );
+        }
+      } catch (err) {
+        console.error('[SOCP] Bad PUBLIC_CHANNEL_UPDATED payload:', err);
       }
     },
     [userId, privateKeyB64, setGroupKeys],
@@ -191,7 +263,7 @@ export const useSocpMessageHandlers = ({
 
       try {
         const targetPubKey = await loadPublicKeyOAEP(targetPubB64);
-        const privKey = await loadPrivateKeyOAEP(privateKeyB64);
+        const privKey = await loadPrivateKey(privateKeyB64);
 
         const ciphertext = await rsaEncrypt(targetPubKey, messageText);
         const ts = currentTimestamp();
@@ -210,16 +282,17 @@ export const useSocpMessageHandlers = ({
           content_sig: contentSig,
         };
 
-        const body = createEnvelope(
+        const body = createSignedEnvelope(
           MESSAGE_TYPES.MSG_DIRECT,
-          userId,
           targetId,
           dmPayload,
-          '',
           ts,
+          privKey,
         );
 
-        sendJsonMessage(body);
+        if (body) {
+          sendJsonMessage(body);
+        }
 
         setMessages(prev => {
           const arr = prev[targetId] ? [...prev[targetId]] : [];
@@ -235,6 +308,7 @@ export const useSocpMessageHandlers = ({
       privateKeyB64,
       publicKeyB64,
       userId,
+      createSignedEnvelope,
       sendJsonMessage,
       setMessages,
     ],
@@ -255,7 +329,7 @@ export const useSocpMessageHandlers = ({
 
         const ts = currentTimestamp();
 
-        const privKey = await loadPrivateKeyOAEP(privateKeyB64);
+        const privKey = await loadPrivateKey(privateKeyB64);
         const contentSig = await computePublicContentSig(
           privKey,
           ciphertext,
@@ -269,16 +343,17 @@ export const useSocpMessageHandlers = ({
           content_sig: contentSig,
         };
 
-        const body = createEnvelope(
+        const body = createSignedEnvelope(
           MESSAGE_TYPES.MSG_PUBLIC_CHANNEL,
-          userId,
           'public',
           pubPayload,
-          '',
           ts,
+          privKey,
         );
 
-        sendJsonMessage(body);
+        if (body) {
+          sendJsonMessage(body);
+        }
 
         setMessages(prev => {
           const arr = prev.public ? [...prev.public] : [];
@@ -294,6 +369,7 @@ export const useSocpMessageHandlers = ({
       privateKeyB64,
       publicKeyB64,
       userId,
+      createSignedEnvelope,
       sendJsonMessage,
       setMessages,
     ],
@@ -308,7 +384,7 @@ export const useSocpMessageHandlers = ({
         const ts = currentTimestamp();
         const fileId = crypto.randomUUID();
 
-        const privKey = await loadPrivateKeyOAEP(privateKeyB64);
+        const privKey = await loadPrivateKey(privateKeyB64);
         let targetPubKey = null;
         let aesKey = null;
 
@@ -334,16 +410,16 @@ export const useSocpMessageHandlers = ({
           mode,
         };
 
-        sendJsonMessage(
-          createEnvelope(
-            MESSAGE_TYPES.FILE_START,
-            userId,
-            to,
-            startPayload,
-            '',
-            ts,
-          ),
+        const fileStart = createSignedEnvelope(
+          MESSAGE_TYPES.FILE_START,
+          to,
+          startPayload,
+          ts,
+          privKey,
         );
+        if (fileStart) {
+          sendJsonMessage(fileStart);
+        }
 
         const buf = await file.arrayBuffer();
         const u8 = new Uint8Array(buf);
@@ -385,29 +461,29 @@ export const useSocpMessageHandlers = ({
             content_sig: contentSig,
           };
 
-          sendJsonMessage(
-            createEnvelope(
-              MESSAGE_TYPES.FILE_CHUNK,
-              userId,
-              to,
-              chunkPayload,
-              '',
-              tsChunk,
-            ),
+          const fileChunk = createSignedEnvelope(
+            MESSAGE_TYPES.FILE_CHUNK,
+            to,
+            chunkPayload,
+            tsChunk,
+            privKey,
           );
+          if (fileChunk) {
+            sendJsonMessage(fileChunk);
+          }
         }
 
         const endPayload = { file_id: fileId, total_chunks: totalChunks };
-        sendJsonMessage(
-          createEnvelope(
-            MESSAGE_TYPES.FILE_END,
-            userId,
-            to,
-            endPayload,
-            '',
-            ts,
-          ),
+        const fileEnd = createSignedEnvelope(
+          MESSAGE_TYPES.FILE_END,
+          to,
+          endPayload,
+          ts,
+          privKey,
         );
+        if (fileEnd) {
+          sendJsonMessage(fileEnd);
+        }
 
         const url = URL.createObjectURL(
           new Blob([u8], { type: 'application/octet-stream' }),
@@ -434,6 +510,7 @@ export const useSocpMessageHandlers = ({
       privateKeyB64,
       knownPubkeys,
       groupKeys,
+      createSignedEnvelope,
     ],
   );
 
@@ -476,7 +553,7 @@ export const useSocpMessageHandlers = ({
             const plain = await aesDecrypt(groupKeys['public'], ciphertext);
             bytes = utf8ToBytes(plain);
           } else {
-            const privKey = await loadPrivateKeyOAEP(privateKeyB64);
+            const privKey = await loadPrivateKey(privateKeyB64);
             bytes = await rsaDecrypt(privKey, ciphertext);
           }
 
@@ -560,6 +637,7 @@ export const useSocpMessageHandlers = ({
     onUserDeliver,
     onUserAdvertise,
     onPublicChannelKeyShare,
+    onPublicChannelUpdated,
     onUserRemove,
     sendDirectDM,
     sendPublicMessage,

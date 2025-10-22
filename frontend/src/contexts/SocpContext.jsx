@@ -12,11 +12,13 @@ import { ReadyState, useSocpConnection } from '../hooks/useSocpConnection';
 import useSocpIdentity from '../hooks/useSocpIdentity';
 import useSocpMessageHandlers from '../hooks/useSocpMessageHandlers';
 import { createEnvelope } from '../services/transport/envelopeService';
+import { loadPrivateKey, computeTransportSig } from '../services/crypto/cryptoService';
 
 const SocpCtx = createContext(null);
 
 export function SocpProvider({ children }) {
-  const serverUri = process.env.REACT_APP_WS_URL || 'ws://127.0.0.1:8080/ws';
+  const serverUri =
+    process.env.REACT_APP_BACKEND_WS_URL || 'wss://127.0.0.1:8080/ws';
 
   const { userId, privateKeyB64, publicKeyB64 } = useSocpIdentity();
 
@@ -30,12 +32,12 @@ export function SocpProvider({ children }) {
 
   const { sendJsonMessage, lastJsonMessage, readyState, wsState } =
     useSocpConnection(serverUri, {
-      reconnectAttempts: Number(process.env.RECONNECT_ATTEMPTS) || 3,
+      reconnectAttempts: Number(process.env.REACT_APP_RECONNECT_ATTEMPTS) || 3,
       reconnectInterval: 2000,
     });
 
   const sendUserHello = useCallback(() => {
-    if (!publicKeyB64 || !userId) return;
+    if (!publicKeyB64 || !privateKeyB64 || !userId) return;
 
     const payload = {
       client: 'local-cli-v1',
@@ -43,15 +45,22 @@ export function SocpProvider({ children }) {
       enc_pubkey: publicKeyB64,
     };
 
-    const body = createEnvelope(
-      MESSAGE_TYPES.USER_HELLO,
-      userId,
-      'server',
-      payload,
-    );
-    sendJsonMessage(body);
-    console.info('[SOCP] → USER_HELLO sent', body);
-  }, [publicKeyB64, userId, sendJsonMessage]);
+    try {
+      const privKey = loadPrivateKey(privateKeyB64);
+      const sig = computeTransportSig(privKey, payload);
+      const body = createEnvelope(
+        MESSAGE_TYPES.USER_HELLO,
+        userId,
+        'server',
+        payload,
+        sig,
+      );
+      sendJsonMessage(body);
+      console.info('[SOCP] → USER_HELLO sent', body);
+    } catch (err) {
+      console.error('[SOCP] Failed to sign USER_HELLO payload:', err);
+    }
+  }, [publicKeyB64, privateKeyB64, userId, sendJsonMessage]);
 
   useEffect(() => {
     if (
@@ -75,6 +84,7 @@ export function SocpProvider({ children }) {
     onUserDeliver,
     onUserAdvertise,
     onPublicChannelKeyShare,
+    onPublicChannelUpdated,
     onUserRemove,
     sendDirectDM,
     sendPublicMessage,
@@ -132,6 +142,9 @@ export function SocpProvider({ children }) {
       case MESSAGE_TYPES.PUBLIC_CHANNEL_KEY_SHARE:
         onPublicChannelKeyShare(lastJsonMessage);
         break;
+      case MESSAGE_TYPES.PUBLIC_CHANNEL_UPDATED:
+        onPublicChannelUpdated(lastJsonMessage);
+        break;
       case MESSAGE_TYPES.FILE_START:
         handleFileStart(lastJsonMessage);
         break;
@@ -156,6 +169,7 @@ export function SocpProvider({ children }) {
     onUserAdvertise,
     onUserRemove,
     onPublicChannelKeyShare,
+    onPublicChannelUpdated,
     handleFileStart,
     handleFileChunk,
     handleFileEnd,
