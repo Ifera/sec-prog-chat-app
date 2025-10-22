@@ -396,7 +396,7 @@ class Server(BaseServer):
         user_id = msg.from_
 
         async def _err(code, detail):
-            await self._error_to(ws=websocket, code=code, detail=detail + " Closing connection.")
+            await self._error_to(ws=websocket, code=code, detail=detail + " Closing connection.", to=user_id or "user")
             await websocket.close()
 
         # verify required payload fields
@@ -973,9 +973,9 @@ class Server(BaseServer):
             self.logger.error(f"[FILE-END] failed: {e!r}")
 
     # ---------- utilities ----------
-    async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str):
+    async def _error_to(self, ws: ServerConnection, code: ErrorCode, detail: str, *, to: str = "*"):
         payload = ErrorPayload(code=code, detail=detail).model_dump()
-        body = self._signed_body(MsgType.ERROR, "*", payload, current_timestamp())
+        body = self._signed_body(MsgType.ERROR, to, payload, current_timestamp())
         try:
             await ws.send(body)
             self.logger.error(f"[ERROR->client] sent error {code}: {detail}")
