@@ -2,7 +2,7 @@ import json
 import sqlite3
 from typing import Optional, Dict, Any
 
-from crypto import load_public_key, rsa_encrypt, rsa_decrypt, load_private_key, generate_aes_key
+from crypto import load_public_key, rsa_encrypt, rsa_decrypt, load_private_key, generate_aes_key, hash_string
 
 
 class Database:
@@ -14,9 +14,9 @@ class Database:
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
 
-            # cursor.execute("DROP TABLE IF EXISTS users")
-            # cursor.execute("DROP TABLE IF EXISTS groups")
-            # cursor.execute("DROP TABLE IF EXISTS group_members")
+            # remove all users from public channel on bootup
+            # users will be added back on demand
+            cursor.execute("DROP TABLE IF EXISTS group_members")
 
             # Users
             cursor.execute('''
@@ -24,8 +24,8 @@ class Database:
                            (
                                user_id       TEXT PRIMARY KEY,
                                pubkey        TEXT    NOT NULL,
-                               privkey_store TEXT    NOT NULL,
-                               pake_password TEXT    NOT NULL,
+                               privkey_store TEXT,
+                               pake_password TEXT,
                                meta          TEXT,
                                version       INTEGER NOT NULL DEFAULT 1
                            )
@@ -84,13 +84,25 @@ class Database:
                 }
         return None
 
-    def add_user(self, user_id: str, pubkey: str, privkey_store: str, pake_password: str, meta: Optional[Dict] = None):
+    def add_user(self, user_id: str, pubkey: str, password: str, meta: Optional[Dict] = None, version: int = 1, *, remote_user: bool = False):
+        pake_password = "" if remote_user else hash_string(password)
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                INSERT OR REPLACE INTO users (user_id, pubkey, privkey_store, pake_password, meta, version)
-                VALUES (?, ?, ?, ?, ?, 1)
-            ''', (user_id, pubkey, privkey_store, pake_password, json.dumps(meta) if meta else None))
+                INSERT OR REPLACE INTO users (user_id, pubkey, pake_password, meta, version)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (user_id, pubkey, pake_password, json.dumps(meta) if meta else None, version))
+            conn.commit()
+
+    def update_user(self, user_id: str, pubkey: str, meta: Optional[Dict] = None, version: int = 1):
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("UPDATE users SET pubkey = ?, meta = COALESCE(?, meta), version = COALESCE(?, version) WHERE user_id = ?", (
+                pubkey,
+                json.dumps(meta) if meta is not None else None,
+                version,
+                user_id,
+            ))
             conn.commit()
 
     def get_group_members(self, group_id: str) -> Dict[str, Dict[str, Any]]:
@@ -166,7 +178,7 @@ class Database:
             cur.execute("UPDATE groups SET meta = ? WHERE group_id = ?", (meta_json, group_id))
             conn.commit()
 
-    def add_user_to_public_channel(self, user_id: str, pubkey: str, server_private_key_b64: str, server_public_key_b64: str):
+    def add_user_to_public_channel(self, user_id: str, server_public_key_b64: str):
         group = self.get_group("public")
         if not group:
             return False

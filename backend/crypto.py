@@ -1,12 +1,16 @@
 import base64
 import json
 import os
+from typing import Final
 from typing import Tuple
 
+import bcrypt
 from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import rsa, padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+DEFAULT_ROUNDS: Final[int] = 12
 
 
 def base64url_encode(data: bytes) -> str:
@@ -145,3 +149,33 @@ def compute_key_share_sig(private_key: rsa.RSAPrivateKey, shares: list, creator_
     canonical_shares = json.dumps(shares, sort_keys=True, separators=(',', ':'))
     data = canonical_shares + creator_pub
     return rsa_sign(private_key, data.encode('utf-8'))
+
+
+def hash_string(plain_string: str, *, rounds: int = DEFAULT_ROUNDS) -> str:
+    """
+    Hash a plaintext string using bcrypt with a per-string random salt.
+    Returns the full bcrypt hash string (includes version, cost, salt, and hash)
+    """
+    if not isinstance(plain_string, str) or not plain_string:
+        raise ValueError("Please provide a non-empty string.")
+
+    pw_bytes = plain_string.encode("utf-8")
+    salt = bcrypt.gensalt(rounds=rounds)  # random salt, cost embedded
+    hashed = bcrypt.hashpw(pw_bytes, salt)  # bytes
+    return hashed.decode("utf-8")  # store as str
+
+
+def verify_string(plain_string: str, stored_hash: str) -> bool:
+    """
+    Verify a plaintext string against a stored bcrypt hash string.
+    Returns True/False. Uses constant-time comparison internally.
+    """
+    if not plain_string or not stored_hash:
+        return False
+
+    try:
+        pw_bytes = plain_string.encode("utf-8")
+        hash_bytes = stored_hash.encode("utf-8")
+        return bcrypt.checkpw(pw_bytes, hash_bytes)
+    except (ValueError, TypeError):
+        return False

@@ -28,6 +28,7 @@ logger = logging.getLogger("Client")
 class Client:
     def __init__(self, server_host: str, server_port: int, reconnect_attempts: int = 3):
         self.server_uri = f"wss://{server_host}:{server_port}/ws"
+        self.password: str = ""
         self.user_id: Optional[str] = None
         self.private_key_b64: Optional[str] = None
         self.public_key_b64: Optional[str] = None
@@ -44,7 +45,8 @@ class Client:
         sig = compute_transport_sig(load_private_key(self.private_key_b64), payload_dict)
         return create_body(mtype, self.user_id, to, payload_dict, sig, ts)
 
-    def init_user(self, user_id: Optional[str] = None):
+    def init_user(self, password: str, user_id: Optional[str] = None):
+        self.password = password
         self.user_id = user_id or generate_uuid()
         self.private_key_b64, self.public_key_b64 = generate_rsa_keypair()
         self.received_dir = os.path.join(os.getcwd(), "received", user_id)
@@ -76,7 +78,7 @@ class Client:
 
     async def _send_user_hello(self):
         assert self.websocket is not None, "websocket not connected"
-        hello_pl = UserHelloPayload(client="local-cli-v1", pubkey=self.public_key_b64).model_dump()
+        hello_pl = UserHelloPayload(client="local-cli-v1", pubkey=self.public_key_b64, password=self.password).model_dump()
         body = self._signed_body(MsgType.USER_HELLO, "server", hello_pl, current_timestamp())
         await self.websocket.send(body)
 
@@ -128,7 +130,7 @@ class Client:
     async def _handle_error(self, msg: ProtocolMessage):
         payload = ErrorPayload(**msg.payload)
         match payload.code:
-            case ErrorCode.NAME_IN_USE, ErrorCode.FILE_TOO_BIG:
+            case ErrorCode.NAME_IN_USE | ErrorCode.FILE_TOO_BIG | ErrorCode.INVALID_PUBLIC_KEY | ErrorCode.INVALID_PASSWORD:
                 logger.error(payload.detail)
             case _:
                 logger.error(f"Unknown error: {payload}")
@@ -342,6 +344,7 @@ class Client:
             return
 
         logger.error("Unknown command: %s", cmd)
+        print_commands()
 
     async def _send_file(self, mode, to, path):
         if not os.path.isfile(path):
@@ -352,7 +355,7 @@ class Client:
         with open(path, "rb") as f:
             data = f.read()
         size = len(data)
-        if size > config.MAX_FILE_SIZE:
+        if size > config.max_file_size:
             logger.error("File too large: %s", path)
             return
         sha256 = hashlib.sha256(data).hexdigest()
@@ -399,25 +402,39 @@ class Client:
             self.websocket = None
 
 
+def print_commands():
+    logger.info("Available commands:")
+    logger.info("- /list")
+    logger.info("- /tell <user> <msg>")
+    logger.info("- /all <msg>")
+    logger.info("- /file dm <user> <file path>")
+    logger.info("- /file public <file path>")
+    logger.info("- /quit")
+
+
 async def interactive_client():
-    # Resolve host/port/user from CLI or env; defaults align with server defaults.
     host = os.getenv("SERVER_HOST", "127.0.0.1")
     port = int(os.getenv("SERVER_PORT", "8080"))
     uid = None
 
-    # CLI: python client.py [user_id] [host] [port]
+    # CLI: python client.py <password> [user_id] [host] [port]
     if len(sys.argv) >= 2 and sys.argv[1]:
-        uid = sys.argv[1]
+        password = sys.argv[1]
+    else:
+        logger.error("Password (required) not provided as first argument")
+        return
     if len(sys.argv) >= 3 and sys.argv[2]:
-        host = sys.argv[2]
+        uid = sys.argv[2]
     if len(sys.argv) >= 4 and sys.argv[3]:
+        host = sys.argv[3]
+    if len(sys.argv) >= 5 and sys.argv[4]:
         try:
             port = int(sys.argv[3])
         except ValueError:
             logger.error("Invalid port: %s", sys.argv[3])
 
     client = Client(server_host=host, server_port=port, reconnect_attempts=3)
-    client.init_user(uid)
+    client.init_user(password, uid)
 
     try:
         await client.connect()
@@ -425,15 +442,9 @@ async def interactive_client():
         logger.error("giving up connecting to %s:%s: %r", host, port, e)
         return
 
-    print("Commands:")
-    print("- /list")
-    print("- /tell <user> <msg>")
-    print("- /all <msg>")
-    print("- /file dm <user> <file path>")
-    print("- /file public <file path>")
-    print("- /quit")
-
+    print_commands()
     loop = asyncio.get_running_loop()
+
     try:
         while True:
             try:

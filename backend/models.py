@@ -38,12 +38,10 @@ class MsgType(StrEnum):
 
 class ErrorCode(StrEnum):
     USER_NOT_FOUND = "USER_NOT_FOUND"
-    INVALID_SIG = "INVALID_SIG"
-    BAD_KEY = "BAD_KEY"
-    TIMEOUT = "TIMEOUT"
-    UNKNOWN_TYPE = "UNKNOWN_TYPE"
     NAME_IN_USE = "NAME_IN_USE"
     FILE_TOO_BIG = "FILE_TOO_BIG"
+    INVALID_PUBLIC_KEY = "INVALID_PUBLIC_KEY"
+    INVALID_PASSWORD = "INVALID_PASSWORD"
 
 
 class ProtocolMessage(BaseModel):
@@ -130,6 +128,7 @@ class UserHelloPayload(BaseModel):
     client: str
     pubkey: str
     enc_pubkey: Optional[str] = None
+    password: str
 
 
 class MsgDirectPayload(BaseModel):

@@ -12,11 +12,10 @@ from websockets.exceptions import (
     WebSocketException,
 )
 
-from backend.crypto import load_public_key
 from base_server import BaseServer
 from common import Peer, create_body
 from config import config
-from crypto import load_private_key, compute_key_share_sig, verify_transport_sig
+from crypto import load_private_key, compute_key_share_sig, verify_transport_sig, load_public_key, verify_string
 from database import Database
 from models import (
     MsgType, ErrorCode,
@@ -134,7 +133,7 @@ class Server(BaseServer):
                         for ci in welcome.clients:
                             self.user_locations[ci.user_id] = ci.server_id
                             # Add to db for pubkey access
-                            self.db.add_user(ci.user_id, ci.pubkey, "", "", {})
+                            self.db.add_user(ci.user_id, ci.pubkey, "", {}, remote_user=True)
 
                         self.logger.info("[BOOTSTRAP] Bootstrap complete")
 
@@ -344,7 +343,7 @@ class Server(BaseServer):
             origin_sid = data.from_
             self.user_locations[payload.user_id] = origin_sid
             # save or update remote user to db
-            self.db.add_user(payload.user_id, payload.pubkey, "", "", payload.meta or {})
+            self.db.add_user(payload.user_id, payload.pubkey, "", payload.meta or {}, remote_user=True)
             self.logger.info(f"[GOSSIP] user {payload.user_id} @ server {origin_sid}")
             # advertise to local clients about this new user
             await self._broadcast_local_user_advertise(payload.user_id, payload.pubkey)
@@ -395,15 +394,46 @@ class Server(BaseServer):
     async def _handle_user_hello(self, websocket: ServerConnection, msg: ProtocolMessage):
         payload = UserHelloPayload(**msg.payload)
         user_id = msg.from_
-        if user_id in self.local_users or user_id in self.user_locations:
-            await self._error_to(ws=websocket, code=ErrorCode.NAME_IN_USE, detail="User ID already in use. Closing connection.")
+
+        async def _err(code, detail):
+            await self._error_to(ws=websocket, code=code, detail=detail + " Closing connection.")
             await websocket.close()
+
+        # verify required payload fields
+        if not user_id or not isinstance(user_id, str) or user_id.strip() == "":
+            await _err(code=ErrorCode.USER_NOT_FOUND, detail="Invalid user ID.")
             return
+
+        if not payload.pubkey or not isinstance(payload.pubkey, str) or payload.pubkey.strip() == "":
+            await _err(code=ErrorCode.INVALID_PUBLIC_KEY, detail="Invalid public key.")
+            return
+
+        if not payload.password or not isinstance(payload.password, str) or payload.password.strip() == "":
+            await _err(code=ErrorCode.INVALID_PASSWORD, detail="Invalid password.")
+            return
+
+        # check if the user with this ID is already connected locally or remotely
+        if user_id in self.local_users or user_id in self.user_locations:
+            await _err(code=ErrorCode.NAME_IN_USE, detail="User ID already in use.")
+            return
+
+        # next, check if the user is registered in the db
+        user_rec = self.db.get_user(user_id)
+        # if not found, then add the local user
+        # else, validate password and update pubkey
+        if not user_rec:
+            self.db.add_user(user_id, payload.pubkey, payload.password, {}, remote_user=False)
+        else:
+            if not verify_string(payload.password, user_rec["pake_password"]):
+                await _err(code=ErrorCode.INVALID_PASSWORD, detail="Invalid password.")
+                return
+
+            # update pubkey
+            self.db.update_user(user_id, payload.pubkey, user_rec["meta"], user_rec["version"])
 
         self.local_users[user_id] = websocket
         self.user_locations[user_id] = "local"
         self.ws_to_user[websocket] = user_id
-        self.db.add_user(user_id, payload.pubkey, "", "", {})
 
         # when a new user connects, we first advertise their identity to all other servers/peers and the introducer
         # then we send the existing roster to the new user (both local and remote users) to ensure the new user learns about earlier users' pubkeys'
@@ -418,8 +448,8 @@ class Server(BaseServer):
         # tell all local users (including the new one) about this new user
         await self._broadcast_local_user_advertise(user_id, payload.pubkey)
 
-        # Add user to public channel and broadcast updated
-        if self.db.add_user_to_public_channel(user_id, payload.pubkey, self.server_private_key, self.server_public_key):
+        # add user to public channel and broadcast updated
+        if self.db.add_user_to_public_channel(user_id, self.server_public_key):
             await self._broadcast_public_channel_updated_and_key_share()
 
     async def _gossip_user_advertise(self, user_id: str, pubkey: str):
@@ -773,7 +803,7 @@ class Server(BaseServer):
             payload = FileStartPayload(**data.payload)
 
             if payload.size > config.max_file_size:
-                await self._error_to(websocket,  ErrorCode.FILE_TOO_BIG, "File size exceeds maximum allowed size.")
+                await self._error_to(websocket, ErrorCode.FILE_TOO_BIG, "File size exceeds maximum allowed size.")
                 return
 
             _key = f"file_start_{payload.file_id}_{hash(json.dumps(data.payload, sort_keys=True))}"
