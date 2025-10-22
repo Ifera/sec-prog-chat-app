@@ -82,3 +82,45 @@
   transform: translateY(0);
   box-shadow: none;
 }
+
+.inputWrapper {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 0;
+}
+
+.inputWithButton {
+  border-top-right-radius: 0;   /* fuse with button */
+  border-bottom-right-radius: 0;
+  padding-right: 12px;          /* normal padding */
+}
+
+.randomBtn {
+  border: 1px solid #d1d5db;
+  background: #f8fafc;
+  color: #111827;
+  padding: 0 12px;
+  border-left: 0;               /* remove the middle seam */
+  border-top-right-radius: 10px;  /* match your input radius */
+  border-bottom-right-radius: 10px;
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  height: 100%;                 /* same height as the input */
+  line-height: normal;
+  cursor: pointer;
+}
+
+/* Optional hover/focus styles */
+.randomBtn:hover:not(:disabled) {
+  background: #eef2f7;
+}
+
+.inputWrapper:focus-within .randomBtn {
+  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.25);
+}
+
+.randomBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}

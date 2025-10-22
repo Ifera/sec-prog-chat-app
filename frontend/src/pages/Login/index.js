@@ -9,7 +9,6 @@ const Login = () => {
   const [localError, setLocalError] = useState('');
 
   useEffect(() => {
-    // Bubble up server-side login errors
     if (auth.status === 'error') {
       setLocalError(auth.errorDetail || auth.errorCode || 'Login failed');
     } else {
@@ -27,6 +26,12 @@ const Login = () => {
     login(username.trim(), password);
   };
 
+  const handleRandom = () => {
+    const id = crypto.randomUUID();
+    setUsername(id);
+    setLocalError('');
+  };
+
   const disabled = auth.status === 'pending';
 
   return (
@@ -37,15 +42,27 @@ const Login = () => {
 
         <label className={styles.label}>
           Username
-          <input
-            className={styles.input}
-            type="text"
-            value={username}
-            autoComplete="username"
-            onChange={(e) => setUsername(e.target.value)}
-            required
-            disabled={disabled}
-          />
+          <div className={styles.inputWrapper}>
+            <input
+              className={`${styles.input} ${styles.inputWithButton}`}
+              type="text"
+              value={username}
+              autoComplete="username"
+              onChange={(e) => setUsername(e.target.value)}
+              required
+              disabled={disabled}
+            />
+            <button
+              type="button"
+              className={styles.randomBtn}
+              onClick={handleRandom}
+              disabled={disabled}
+              aria-label="Generate random username"
+              title="Generate random username"
+            >
+              Random
+            </button>
+          </div>
         </label>
 
         <label className={styles.label}>
