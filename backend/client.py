@@ -10,7 +10,7 @@ from websockets.asyncio.client import connect, ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
 
-from backend.models import PublicChannelUpdatedPayload
+from backend.models import PublicChannelUpdatedPayload, ErrorPayload, ErrorCode
 from common import create_body
 from config import config
 from crypto import (
@@ -38,6 +38,7 @@ class Client:
         self.received_dir: str | None = None
         self._listen_task: Optional[asyncio.Task] = None
         self._reconnect_attempts = max(1, reconnect_attempts)
+        self.closed = False
 
     def _signed_body(self, mtype, to, payload_dict, ts=None) -> str:
         sig = compute_transport_sig(load_private_key(self.private_key_b64), payload_dict)
@@ -120,9 +121,17 @@ class Client:
             case MsgType.FILE_END:
                 await self._handle_file_end(msg)
             case MsgType.ERROR:
-                logger.error("ERROR: %s", msg.payload)
+                await self._handle_error(msg)
             case _:
                 logger.error(f"Unknown message type: {mtype} for request: {msg}")
+
+    async def _handle_error(self, msg: ProtocolMessage):
+        payload = ErrorPayload(**msg.payload)
+        match payload.code:
+            case ErrorCode.NAME_IN_USE:
+                logger.error(payload.detail)
+            case _:
+                logger.error(f"Unknown error: {payload}")
 
     async def _on_user_deliver(self, data: ProtocolMessage):
         payload = UserDeliverPayload(**data.payload)

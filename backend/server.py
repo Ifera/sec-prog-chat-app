@@ -388,7 +388,8 @@ class Server(BaseServer):
         payload = UserHelloPayload(**msg.payload)
         user_id = msg.from_
         if user_id in self.local_users:
-            await self._error_to(ws=websocket, code=ErrorCode.NAME_IN_USE, detail="User ID already in use")
+            await self._error_to(ws=websocket, code=ErrorCode.NAME_IN_USE, detail="User ID already in use. Closing connection.")
+            await websocket.close()
             return
 
         self.local_users[user_id] = websocket
@@ -591,7 +592,7 @@ class Server(BaseServer):
                 await peer.ws.send(req)
                 self.logger.info(f"[GOSSIP] USER_REMOVE '{user_id}' -> server '{sid}'")
             except Exception as e:
-                self.logger.warning(f"[GOSSIP] USER_REMOVE to {sid} failed: {e!r}")
+                self.logger.error(f"[GOSSIP] USER_REMOVE to {sid} failed: {e!r}")
 
         # send to introducer
         if self.introducer_ws:
@@ -599,7 +600,7 @@ class Server(BaseServer):
                 await self.introducer_ws.send(req)
                 self.logger.info(f"[GOSSIP] USER_REMOVE '{user_id}' -> Introducer")
             except Exception as e:
-                self.logger.warning(f"[GOSSIP] USER_REMOVE to Introducer failed: {e!r}")
+                self.logger.error(f"[GOSSIP] USER_REMOVE to Introducer failed: {e!r}")
 
     async def _cleanup_local_user(self, user_id: str, reason: str = "disconnect", is_remote_call: bool = False):
         """Idempotent local cleanup: routing maps, DB, and gossip."""
@@ -940,6 +941,7 @@ class Server(BaseServer):
         body = self._signed_body(MsgType.ERROR, "*", payload, current_timestamp())
         try:
             await ws.send(body)
+            self.logger.error(f"[ERROR->client] sent error {code}: {detail}")
         except Exception as e:
             self.logger.error(f"[ERROR->client] failed to send error: {e!r}")
 
