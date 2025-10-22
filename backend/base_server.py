@@ -92,6 +92,8 @@ class BaseServer:
         pass
 
     async def _shutdown_cleanup(self):
+        await self.shutdown("force shutdown")
+
         for t in list(self._bg_tasks):
             if not t.done():
                 t.cancel()
@@ -164,13 +166,13 @@ class BaseServer:
             await asyncio.sleep(max(0.0, hb_interval - elapsed))
 
     # ---------- peer close ----------
-    async def _on_peer_closed(self, sid: str, timed_out: bool = False):
+    async def _on_peer_closed(self, sid: str, timed_out: bool = False, msg: str = None):
         peer = self.peers.pop(sid, None)
 
         if peer:
             try:
                 await peer.ws.close()
-                reason = "timeout" if timed_out else "disconnect"
+                reason = "timeout" if timed_out else msg if msg is not None else "disconnect"
                 self.logger.info(f"Closed peer: {sid} due to {reason}")
             except Exception as e:
                 self.logger.error(f"[CLOSE] Peer close {sid} failed: {e!r}")
@@ -187,6 +189,7 @@ class BaseServer:
     # ---------- incoming handling ----------
     async def _incoming(self, websocket: ServerConnection):
         sid: Optional[str] = None
+        disconnet_msg = "shutdown"
         try:
             async for raw in websocket:
                 try:
@@ -209,13 +212,13 @@ class BaseServer:
                             sid = psid
                             break
 
-        except (ConnectionClosedError, ConnectionClosedOK):
-            pass
+        except (ConnectionClosedError, ConnectionClosedOK) as e:
+            disconnet_msg = f"closed via socket - {e!r}"
         except Exception as e:
             self.logger.error(f"[INCOMING] Unhandled error in connection loop: {e!r}")
         finally:
             if sid:
-                await self._on_peer_closed(sid)
+                await self._on_peer_closed(sid, msg=disconnet_msg)
             else:
                 try:
                     await self.on_client_disconnect(websocket)

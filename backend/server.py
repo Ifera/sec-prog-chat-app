@@ -70,6 +70,14 @@ class Server(BaseServer):
 
         self.local_users.clear()
 
+    async def on_peer_closed(self, sid: str):
+        remote_users = []
+        for user_id, server_id in self.user_locations.items():
+            if server_id == sid:
+                remote_users.append(user_id)
+        for user_id in remote_users:
+            await self._cleanup_local_user(user_id, reason=f"peer-{sid}-gone", is_remote_call=True)
+
     # executed on startup - connect with an introducer and link with servers and get a list of connected clients
     async def bootstrap_to_network(self):
         self.logger.info("[BOOTSTRAP] Starting bootstrap to introducers...")
@@ -326,7 +334,7 @@ class Server(BaseServer):
     async def _handle_server_goodbye(self, data: ProtocolMessage):
         try:
             sid = data.from_
-            await self._on_peer_closed(sid)
+            await self._on_peer_closed(sid, msg="disconnet via SERVER_GOODBYE")
         except Exception as e:
             self.logger.error(f"[GOODBYE] failed: {e!r}")
 
@@ -387,7 +395,7 @@ class Server(BaseServer):
     async def _handle_user_hello(self, websocket: ServerConnection, msg: ProtocolMessage):
         payload = UserHelloPayload(**msg.payload)
         user_id = msg.from_
-        if user_id in self.local_users:
+        if user_id in self.local_users or user_id in self.user_locations:
             await self._error_to(ws=websocket, code=ErrorCode.NAME_IN_USE, detail="User ID already in use. Closing connection.")
             await websocket.close()
             return
@@ -396,10 +404,6 @@ class Server(BaseServer):
         self.user_locations[user_id] = "local"
         self.ws_to_user[websocket] = user_id
         self.db.add_user(user_id, payload.pubkey, "", "", {})
-
-        # Add user to public channel and broadcast updated
-        if self.db.add_user_to_public_channel(user_id, payload.pubkey, self.server_private_key, self.server_public_key):
-            await self._broadcast_public_channel_updated_and_key_share()
 
         # when a new user connects, we first advertise their identity to all other servers/peers and the introducer
         # then we send the existing roster to the new user (both local and remote users) to ensure the new user learns about earlier users' pubkeys'
@@ -413,6 +417,10 @@ class Server(BaseServer):
 
         # tell all local users (including the new one) about this new user
         await self._broadcast_local_user_advertise(user_id, payload.pubkey)
+
+        # Add user to public channel and broadcast updated
+        if self.db.add_user_to_public_channel(user_id, payload.pubkey, self.server_private_key, self.server_public_key):
+            await self._broadcast_public_channel_updated_and_key_share()
 
     async def _gossip_user_advertise(self, user_id: str, pubkey: str):
         payload = UserAdvertisePayload(user_id=user_id, server_id=self.server_id, pubkey=pubkey, meta={}).model_dump()
@@ -612,11 +620,11 @@ class Server(BaseServer):
         if ws:
             self.ws_to_user.pop(ws, None)
 
-        # delete from DB
+        # remove user from public channel (group members)
         try:
-            self.db.delete_user(user_id)  # you'll add this in database.py below
+            self.db.remove_user_from_group_members(user_id)
         except Exception as e:
-            self.logger.warning(f"[CLEANUP] DB delete for {user_id} failed: {e!r}")
+            self.logger.debug(f"[CLEANUP] DB removal for {user_id} from group_members failed: {e!r}")
 
         # remove user from local clients
         await self._broadcast_local_user_remove(user_id)
@@ -701,21 +709,15 @@ class Server(BaseServer):
                     self.logger.error(f"[FORWARD-PUB-UPDATED] to server {sid} failed: {e!r}")
 
     async def _handle_public_channel_updated(self, data: ProtocolMessage):
-        if data.from_ == self.server_id:
-            return  # skip self
-
         payload = PublicChannelUpdatedPayload(**data.payload)
         group = self.db.get_group("public")
-        if group and payload.version > group['version']:
+        if group and payload.version >= group['version']:
             self.db.update_group_version("public", payload.version)
             for wrap in payload.wraps:
                 self.db.add_group_member("public", wrap['member_id'], "member", wrap['wrapped_key'])
                 # DB is updated; clients will handle shares
 
     async def _handle_public_channel_key_share(self, data: ProtocolMessage):
-        if data.from_ == self.server_id:
-            return
-
         req = create_body(data.type, data.from_, "*", data.payload, ts=data.ts, sig=data.sig)
 
         # Send to local clients

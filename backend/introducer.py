@@ -25,7 +25,7 @@ class Introducer(BaseServer):
 
         # introducer directory
         self.known_servers: Dict[str, Dict[str, str | int]] = {}  # sid -> {host, port, pubkey}
-        self.known_users: Dict[str, Dict[str, str | int]] = {}  # uid -> {host, port, pubkey}
+        self.known_users: Dict[str, Dict[str, str | int]] = {}  # uid -> {host, port, pubkey, server_id}
 
     async def on_start(self):
         self.logger.info("[BOOTSTRAP] Acting as introducer; awaiting joins.")
@@ -34,6 +34,13 @@ class Introducer(BaseServer):
     async def on_peer_closed(self, sid: str):
         if sid in self.known_servers:
             self.known_servers.pop(sid, None)
+            server_users = []
+            for uid, user_info in self.known_users.items():
+                if user_info["server_id"] == sid:
+                    server_users.append(uid)
+            for uid in server_users:
+                self.logger.info(f"[INTRODUCER] Removing user {uid} from known users as server {sid} disconnected")
+                self.known_users.pop(uid, None)
 
     # ---------- incoming handling ----------
     async def handle_incoming(self, websocket: ServerConnection, req_type: str, data: ProtocolMessage):
