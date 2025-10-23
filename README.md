@@ -32,6 +32,7 @@ Prerequisites:
 - Tested with Python 3.12
 - Windows Command Prompt (cmd.exe)
 - **Execute commands in `backend/` directory**
+- If you want to generate your own TLS certificates, see `certs/README.md`
 
 Create a virtual environment and install dependencies:
 
@@ -40,6 +41,8 @@ py -3 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+
 
 ### 1) Start an Introducer
 
