@@ -1,6 +1,6 @@
-# Secure Chat (Introducer + Peer Servers + RSA Clients)
+# Secure Chat (Introducer + Peer Servers + Clients)
 
-A multi-server chat system over WebSockets. It consists of:
+A multi-server chat system over secure WebSockets. It consists of:
 
 ## Overview
 
@@ -312,3 +312,11 @@ This implementation has all backdoors/vulnerabilities patched. The following wer
 - Targets: introducer.py, server.py, client.py
 - Scripts: start_*.bat for Windows, .sh for Unix
 
+## Group Members
+
+**Group 59**
+- Muhammad Tayyab Rashid - a1988298
+- Nguyen Duc Tung Bui - a1976012
+- Guilin Luo - a1989840
+- Mazharul Islam Rakib - a1990942
+- Masud Ahammad - a1993200
