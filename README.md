@@ -152,6 +152,9 @@ Run commands same as Windows but with .sh scripts and python3.
 - npm install
 - npm start
 - Open http://localhost:3000
+- Available environment variables:
+  - `REACT_APP_BACKEND_WS_URL`: WebSocket URL (default: wss://localhost:8080/ws)
+  - `REACT_APP_BACKEND_WS_PORT`: WebSocket Port (default: 8080)
 
 ## How to Use
 

@@ -1,6 +1,14 @@
 @echo off
 setlocal enabledelayedexpansion
 
+REM # Group 59
+REM # ----------------------------------
+REM # Muhammad Tayyab Rashid - a1988298
+REM # Nguyen Duc Tung Bui - a1976012
+REM # Guilin Luo - a1989840
+REM # Mazharul Islam Rakib - a1990942
+REM # Masud Ahammad - a1993200
+
 rem Usage:
 rem   start_client.bat <PASSWORD> [USER_ID] [SERVER_HOST] [SERVER_PORT]
 rem Defaults:
