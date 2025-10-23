@@ -10,16 +10,17 @@ from websockets.asyncio.client import connect, ClientConnection
 from websockets.asyncio.server import ServerConnection
 from websockets.exceptions import ConnectionClosedError, ConnectionClosedOK, WebSocketException
 
-from backend.models import PublicChannelUpdatedPayload, ErrorPayload, ErrorCode
 from common import create_body
 from config import config
 from crypto import (
     generate_rsa_keypair, load_private_key, load_public_key, rsa_encrypt, rsa_decrypt, compute_content_sig, verify_content_sig,
     compute_public_content_sig, aes_encrypt, aes_decrypt, verify_public_content_sig, compute_transport_sig
 )
-from models import MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload, \
-    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload, \
-    FileStartPayload, FileChunkPayload, FileEndPayload
+from models import (
+    MsgType, current_timestamp, generate_uuid, ProtocolMessage, UserDeliverPayload, CommandResponsePayload, UserAdvertisePayload,
+    MsgDirectPayload, MsgPublicChannelPayload, CommandPayload, UserHelloPayload, UserRemovePayload,
+    FileStartPayload, FileChunkPayload, FileEndPayload, PublicChannelUpdatedPayload, ErrorPayload, ErrorCode
+)
 
 logging.basicConfig(level=config.logging_level, format=config.logging_format)
 logger = logging.getLogger("Client")
@@ -49,7 +50,7 @@ class Client:
         self.password = password
         self.user_id = user_id or generate_uuid()
         self.private_key_b64, self.public_key_b64 = generate_rsa_keypair()
-        self.received_dir = os.path.join(os.getcwd(), "received", user_id)
+        self.received_dir = os.path.join(os.getcwd(), "received", self.user_id)
         os.makedirs(self.received_dir, exist_ok=True)
         logger.info(f"user_id={self.user_id}")
 

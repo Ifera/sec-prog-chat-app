@@ -10,12 +10,11 @@ from websockets.exceptions import (
     ConnectionClosedOK,
 )
 
-from backend.models import current_timestamp
 from common import Peer, create_body
 from config import config
 from crypto import generate_rsa_keypair, load_private_key, compute_transport_sig
 from models import (
-    MsgType, HeartbeatPayload,
+    MsgType, HeartbeatPayload, current_timestamp,
     generate_uuid, ServerType, ProtocolMessage
 )
 

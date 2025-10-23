@@ -12,6 +12,7 @@ A multi-server chat system over WebSockets. It consists of:
 
 ## Features
 
+- **Authenticated Users**: Each user has to provide (or verify) password to join the network.
 - **Server Bootstrap and Discovery**: Servers join the network via introducers, receiving server IDs and client lists.
 - **Presence Gossip**: User online status is gossiped across servers (USER_ADVERTISE/USER_REMOVE).
 - **Forwarded Delivery**: Messages are routed hop-by-hop to recipient servers.
@@ -94,22 +95,22 @@ Start multiple to form a mesh; they bootstrap and announce via introducers.
 
 ### 3) Start Clients
 
-Connect with a user ID (random UUID if omitted):
+Connect with a user ID (random UUID if omitted). Password is required to join the network:
 
 ```cmd
-start_client.bat
+start_client.bat password
 ```
 
-With args: <USER_ID[str|uuid]> <SERVER_HOST> <SERVER_PORT>
+With args: <PASSWORD> <USER_ID[str|uuid]> <SERVER_HOST> <SERVER_PORT>
 
 ```cmd
-start_client.bat alice 127.0.0.1 8080
+start_client.bat password alice 127.0.0.1 8080
 ```
 
 Run directly:
 
 ```cmd
-python client.py alice 127.0.0.1 8080
+python client.py password alice 127.0.0.1 8080
 ```
 
 Commands:
@@ -149,11 +150,13 @@ Run commands same as Windows but with .sh scripts and python3.
 - npm start
 - Open http://localhost:3000
 
-## HOW TO USE (DEMO STEPS)
+## How to Use
 
 - Start the backend server (see backend section above).
 - Open two browser windows/tabs to http://localhost:3000.
-- Wait until footer shows: "SOCP WS: connected".
+- On the login page, enter a username (or generate a random uuid) and password.
+- Upon successful connection, you will be navigated to the chat page.
+- The footer should show: "SOCP WS: <username> connected".
 - Select a user on the left to start a direct chat.
 - For Public channel: click "#public", type message, press Enter.
 - File transfer: click the paper-clip (Attach) → choose file → it sends as DM or to public depending on current conversation.
@@ -203,6 +206,9 @@ Key vars:
 - DB_PATH: SQLite file (default: chat.db)
 - HEARTBEAT_INTERVAL: Seconds (default: 15)
 - TIMEOUT_THRESHOLD: Seconds (default: 45)
+- TLS_CERT: Path to TLS cert
+- TLS_KEY: Path to TLS key
+- TLS_SKIP_VERIFY: True/False (default: True)
 
 Introducer list (introducers.json):
 
@@ -235,6 +241,7 @@ Default public group entry created on startup.
 ## Mandatory Features (SOCP Compliance)
 
 All REQUIRED for interoperability:
+- Authenticated local users.
 - /list: Sort/return known online users.
 - /tell <user> <text>: DM via RSA E2EE.
 - /all <text>: Public channel broadcast (signed).
@@ -248,13 +255,13 @@ All REQUIRED for interoperability:
 
 ## Security Notes
 
-- RSA-4096 only (no AES as of v1.3).
+- RSA-4096 only.
 - E2EE DMs: Encrypted to recipient pubkey, signed by sender.
 - Public messages: Signed and encrypted.
 - Server keys ephemeral per run (no persistence).
-- No user auth/authority; client keys ephemeral.
-- Direct WebSocket (no TLS).
-- Client verification best-effort; enforces content sigs.
+- User auth/authority; client keys ephemeral.
+- Secure WebSocket (TLS).
+- Transport signature verification on all server messages.
 
 ## Troubleshooting
 
@@ -265,9 +272,15 @@ All REQUIRED for interoperability:
 - Logs: Console output; adjust in config.py.
 - Connection issues: Check firewall, ports, correct WebSocket URLs.
 
-## Backdoors (Assignment Requirement)
+## Backdoors/Vulnerabilities Patched
 
-This implementation includes intentional vulnerabilities as per SOCP v1.3 Section 16 (assignment requirement). At least 2 non-exhaustive backdoors are present:
+This implementation has all backdoors/vulnerabilities patched. The following were patched:
+- v1: using direct websocket (ws) instead of secure websocket with TLS (wss)
+- v2: transport signature not being verified on server messages 
+- v3: db used to hard reset on bootup
+- v4. no file size send limit
+- v5: no duplicate user_id check for remote users
+- v6: no authentication for local users
 
 ## Compliance Checklist
 
@@ -280,6 +293,12 @@ This implementation includes intentional vulnerabilities as per SOCP v1.3 Sectio
 - [x] SERVER_DELIVER routing with loop suppression
 - [x] Heartbeats/45s timeout
 - [x] Error codes implemented
+- [x] User auth/authority; client keys ephemeral
+- [x] Secure WebSocket (TLS)
+- [x] Transport signature verification on all server messages
+- [x] File transfer via encrypted chunks
+- [x] Public channel broadcast (signed)
+- [x] Direct messages (E2EE)
 - [x] Mandatory commands (/list, /tell, /all, /file)
 - [x] Database schema includes users/groups/group_members
 
@@ -287,6 +306,6 @@ This implementation includes intentional vulnerabilities as per SOCP v1.3 Sectio
 
 - Formatting: Follow project style.
 - Dependencies: requirements.txt
-- Targets: introducer.py, server.py (single per PORT?), client.py
+- Targets: introducer.py, server.py, client.py
 - Scripts: start_*.bat for Windows, .sh for Unix
 

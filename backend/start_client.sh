@@ -3,15 +3,23 @@ set -euo pipefail
 
 # --------------------------------------------
 # Usage:
-#   ./start_client.sh [USER_ID] [SERVER_HOST] [SERVER_PORT]
+#   ./start_client.sh <PASSWORD> [USER_ID] [SERVER_HOST] [SERVER_PORT]
 # Defaults:
 #   USER_ID=random  SERVER_HOST=127.0.0.1  SERVER_PORT=8080
 # Behavior mirrors Windows .bat: host/port are passed via env vars.
 # --------------------------------------------
 
-USER_ID="${1:-}"
-SERVER_HOST="${2:-${SERVER_HOST:-127.0.0.1}}"
-SERVER_PORT="${3:-${SERVER_PORT:-8080}}"
+PASSWORD="${1:-}"
+USER_ID="${2:-}"
+SERVER_HOST="${3:-${SERVER_HOST:-127.0.0.1}}"
+SERVER_PORT="${4:-${SERVER_PORT:-8080}}"
+
+if [[ -z "$PASSWORD" ]]; then
+  echo "Error: PASSWORD is required." >&2
+  echo "Usage: $0 <PASSWORD> [USER_ID] [SERVER_HOST] [SERVER_PORT]" >&2
+  echo "Example: $0 mysecretpassword" >&2
+  exit 1
+fi
 
 export SERVER_HOST SERVER_PORT
 
@@ -27,7 +35,7 @@ else
 fi
 
 if [[ -z "$USER_ID" ]]; then
-  exec "$PY" client.py
+  exec "$PY" client.py "$PASSWORD"
 else
-  exec "$PY" client.py "$USER_ID"
+  exec "$PY" client.py "$PASSWORD" "$USER_ID"
 fi

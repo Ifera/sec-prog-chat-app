@@ -48,8 +48,8 @@ fi
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 INTRODUCERS_JSON="${INTRODUCERS_JSON:-introducers.json}"
-TLS_CERT="${TLS_CERT:../certs/dev_cert.pem}"
-TLS_KEY="${TLS_KEY:../certs/dev_key.pem}"
+TLS_CERT="${TLS_CERT:-../certs/dev_cert.pem}"
+TLS_KEY="${TLS_KEY:-../certs/dev_key.pem}"
 
 # CLI args override env/defaults
 if [[ "${1:-}" != "" ]]; then PORT="$1"; fi
@@ -64,7 +64,7 @@ Starting Introducer with:
 
 EOF
 
-export HOST PORT INTRODUCERS_JSON
+export HOST PORT INTRODUCERS_JSON TLS_CERT TLS_KEY
 
 if command -v python3 >/dev/null 2>&1; then
   PY=python3
