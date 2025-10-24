@@ -280,13 +280,16 @@ All REQUIRED for interoperability:
 
 ## Backdoors/Vulnerabilities Patched
 
-This implementation has all backdoors/vulnerabilities patched. The following were patched:
-- v1: using direct websocket (ws) instead of secure websocket with TLS (wss)
-- v2: transport signature not being verified on server messages 
-- v3: db used to hard reset on bootup
-- v4. no file size send limit
-- v5: no duplicate user_id check for remote users
-- v6: no authentication for local users
+This implementation has all backdoors/vulnerabilities **patched**. 
+This associated Proof of Concept (PoC) scripts are present in the `backend/poc/` directory. 
+The following backdoors/vulnerabilities used to exist which are now patched:
+
+1. **Unencrypted WebSocket Transport Vulnerability**: Plain WebSocket connections (WS instead of WSS) enable Man-in-the-Middle interception and modification of messages. This backdoor exploits the assumption that networks are secure, allowing eavesdropping of encrypted payloads without adequate transport security. **PoC**: `01_ws_mitm_proxy.py`
+2. **Unsigned Transport Injection**: Absence of transport signature verification permits injection of unsigned messages, enabling impersonation and unauthorized command execution. This backdoor bypasses authentication through a subtle omission in signature checking logic. **PoC**: `02_unsigned_transport_injection.py`
+3. **Database State Reset on Initialization**: Faulty database initialization that drops all tables on re-initialization, leading to catastrophic data loss. This backdoor simulates improper handling of schema migrations, wiping user data and history on server reboots. **PoC**: `03_db_reset_on_boot.py`
+4. **Unbounded File Transfer Exploitation**: Lack of size or rate limiting on file chunks allows resource exhaustion through oversized uploads. This backdoor enables denial-of-service by exploiting missing validation in file handling routines. **PoC**: `04_unbounded_file_send.py`
+5. **Inter-Server User Advertisement Spoofing**: Unauthorized USER_ADVERTISE messages can create duplicate or spoofed user identities across the mesh network. This backdoor abuses the gossip protocol without proper source authentication, potentially enabling voting manipulation in a consensus system. **PoC**: `05_remote_duplicate_username.py`
+6. **Impersonation Without Authentication**: User registration accepts any identity without verification, allowing direct impersonation of privileged accounts. This backdoor exploits insufficient user authentication mechanisms during onboarding. **PoC**: `06_no_auth_impersonation.py`
 
 ## Compliance Checklist
 
