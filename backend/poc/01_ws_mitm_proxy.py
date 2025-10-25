@@ -27,7 +27,7 @@ async def pump(src, dst, label):
             ts = datetime.datetime.now(datetime.UTC).isoformat()
             try:
                 j = json.loads(msg)
-                print(f"[{ts}] {label} {j.get('type')} from={j.get('from')} to={j.get('to')}")
+                print(f"[{ts}] {label} {j.get('type')} from={j.get('from')} to={j.get('to')} payload={j.get('payload')}")
             except Exception:
                 print(f"[{ts}] {label} raw: {msg[:120]!r}")
             await dst.send(msg)

